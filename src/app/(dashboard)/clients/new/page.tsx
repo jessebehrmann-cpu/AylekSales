@@ -1,14 +1,24 @@
+import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
+import { requireUser } from "@/lib/auth";
+import { NewClientForm } from "./new-client-form";
 
-export default function NewClientPage() {
+export default async function NewClientPage() {
+  const user = await requireUser();
+  if (user.profile?.role !== "admin") {
+    redirect("/clients");
+  }
+
   return (
     <>
-      <PageHeader title="New client" description="Onboard a cleaning company." />
+      <PageHeader
+        title="New client"
+        description="Onboard a cleaning company. Stripe customer + monthly subscription auto-create when an email is supplied."
+      />
       <Card>
-        <CardContent className="py-16 text-center text-sm text-muted-foreground">
-          Client creation form ships in the next pass — name, owner, retainer, revenue share, and
-          Stripe customer/subscription provisioning.
+        <CardContent className="pt-6">
+          <NewClientForm />
         </CardContent>
       </Card>
     </>

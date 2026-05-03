@@ -9,85 +9,50 @@ export type Database = {
     Tables: {
       clients: {
         Row: Client;
-        Insert: Omit<Client, "id" | "created_at" | "revenue_share_pct" | "status"> & {
-          id?: string;
-          created_at?: string;
-          revenue_share_pct?: number;
-          status?: ClientStatus;
-        };
+        Insert: Partial<Omit<Client, "name">> & { name: string };
         Update: Partial<Client>;
         Relationships: [];
       };
       users: {
         Row: AppUser;
-        Insert: Omit<AppUser, "created_at" | "role"> & {
-          created_at?: string;
-          role?: UserRole;
-        };
+        Insert: Partial<Omit<AppUser, "id">> & { id: string };
         Update: Partial<AppUser>;
         Relationships: [];
       };
       leads: {
         Row: Lead;
-        Insert: Omit<Lead, "id" | "created_at" | "updated_at" | "source" | "stage"> & {
-          id?: string;
-          created_at?: string;
-          updated_at?: string;
-          source?: Lead["source"];
-          stage?: LeadStage;
-        };
+        Insert: Partial<Omit<Lead, "company_name">> & { company_name: string };
         Update: Partial<Lead>;
         Relationships: [];
       };
       campaigns: {
         Row: Campaign;
-        Insert: Omit<Campaign, "id" | "created_at" | "status" | "leads_enrolled"> & {
-          id?: string;
-          created_at?: string;
-          status?: CampaignStatus;
-          leads_enrolled?: number;
-        };
+        Insert: Partial<Omit<Campaign, "name">> & { name: string };
         Update: Partial<Campaign>;
         Relationships: [];
       };
       emails: {
         Row: Email;
-        Insert: Omit<Email, "id" | "created_at" | "direction" | "status"> & {
-          id?: string;
-          created_at?: string;
-          direction?: EmailDirection;
-          status?: EmailStatus;
-        };
+        Insert: Partial<Email>;
         Update: Partial<Email>;
         Relationships: [];
       };
       meetings: {
         Row: Meeting;
-        Insert: Omit<Meeting, "id" | "created_at" | "duration_minutes" | "format" | "status"> & {
-          id?: string;
-          created_at?: string;
-          duration_minutes?: number;
-          format?: MeetingFormat;
-          status?: MeetingStatus;
-        };
+        Insert: Partial<Meeting>;
         Update: Partial<Meeting>;
         Relationships: [];
       };
       quotes: {
         Row: Quote;
-        Insert: Omit<Quote, "id" | "created_at" | "status"> & {
-          id?: string;
-          created_at?: string;
-          status?: QuoteStatus;
-        };
+        Insert: Partial<Quote>;
         Update: Partial<Quote>;
         Relationships: [];
       };
       events: {
         Row: AppEvent;
-        Insert: Omit<AppEvent, "id" | "created_at" | "payload"> & {
-          id?: string;
-          created_at?: string;
+        Insert: Partial<Omit<AppEvent, "event_type" | "payload">> & {
+          event_type: EventType;
           payload?: Json;
         };
         Update: Partial<AppEvent>;
@@ -95,10 +60,7 @@ export type Database = {
       };
       queries: {
         Row: AppQuery;
-        Insert: Omit<AppQuery, "id" | "created_at"> & {
-          id?: string;
-          created_at?: string;
-        };
+        Insert: Partial<AppQuery>;
         Update: Partial<AppQuery>;
         Relationships: [];
       };
