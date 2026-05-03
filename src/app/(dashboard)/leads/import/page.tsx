@@ -16,7 +16,7 @@ export default async function ImportLeadsPage() {
     <>
       <PageHeader
         title="Import leads"
-        description="Drop a CSV. Claude maps the columns. You review and confirm."
+        description="Drop a CSV. Aylek maps the columns. You review and confirm."
       />
       <ImportWizard clients={clients ?? []} />
     </>

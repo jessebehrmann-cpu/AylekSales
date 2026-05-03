@@ -35,7 +35,7 @@ export default async function CampaignsPage() {
         <EmptyState
           icon={Send}
           title="No campaigns yet"
-          description="Build a sequence with Claude in under 30 seconds."
+          description="Aylek builds your sequence in under 30 seconds."
           action={
             <Button asChild>
               <Link href="/campaigns/new">Build a campaign</Link>

@@ -22,13 +22,13 @@ export default async function BillingPage() {
     <>
       <PageHeader
         title="Billing"
-        description="Per-client retainers in Stripe. Open the customer portal to manage payment methods, invoices, or pause."
+        description="Per-client retainers managed in the billing portal. Open the customer portal to manage payment methods, invoices, or pause."
       />
 
       {!clients || clients.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            No clients yet. Create one to provision a Stripe customer + subscription.
+            No clients yet. Create one to provision a billing customer + subscription.
           </CardContent>
         </Card>
       ) : (
@@ -51,7 +51,7 @@ export default async function BillingPage() {
                         target="_blank"
                         rel="noreferrer"
                       >
-                        Stripe dashboard <ExternalLink className="ml-1 h-3 w-3" />
+                        Billing dashboard <ExternalLink className="ml-1 h-3 w-3" />
                       </Link>
                     </Button>
                   )}

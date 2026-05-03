@@ -13,7 +13,7 @@ export default function SettingsPage() {
             <CardTitle className="text-base">Billing</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
-            <p className="text-muted-foreground">Manage retainer subscriptions in the Stripe portal.</p>
+            <p className="text-muted-foreground">Manage retainer subscriptions in the billing portal.</p>
             <Button asChild variant="outline" size="sm">
               <Link href="/settings/billing">Open billing</Link>
             </Button>
@@ -24,7 +24,7 @@ export default function SettingsPage() {
             <CardTitle className="text-base">Team</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
-            Team management ships in the next pass.
+            Team management coming soon.
           </CardContent>
         </Card>
       </div>

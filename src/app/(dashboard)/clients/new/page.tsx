@@ -14,7 +14,7 @@ export default async function NewClientPage() {
     <>
       <PageHeader
         title="New client"
-        description="Onboard a cleaning company. Stripe customer + monthly subscription auto-create when an email is supplied."
+        description="Onboard a cleaning company. A billing customer + monthly subscription auto-create when an email is supplied."
       />
       <Card>
         <CardContent className="pt-6">

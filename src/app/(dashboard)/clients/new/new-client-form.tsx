@@ -36,7 +36,7 @@ export function NewClientForm() {
       <div className="grid gap-4 md:grid-cols-2">
         <Field id="name" label="Company name" required />
         <Field id="owner_name" label="Owner / contact name" />
-        <Field id="email" label="Email" type="email" hint="Required if you want a Stripe subscription auto-created." />
+        <Field id="email" label="Email" type="email" hint="Required if you want a billing subscription auto-created." />
         <Field id="phone" label="Phone" />
         <Field id="suburb" label="Suburb" />
         <Field
@@ -45,7 +45,7 @@ export function NewClientForm() {
           type="number"
           required
           defaultValue="0"
-          hint="Stored as whole dollars. Charged monthly via Stripe invoice."
+          hint="Stored as whole dollars. Charged monthly by invoice."
         />
         <Field
           id="revenue_share_pct"

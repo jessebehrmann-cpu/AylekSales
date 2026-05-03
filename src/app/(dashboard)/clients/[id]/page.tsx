@@ -64,7 +64,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
         </Card>
         <Card>
           <CardContent className="pt-6">
-            <p className="text-xs uppercase text-muted-foreground">Stripe</p>
+            <p className="text-xs uppercase text-muted-foreground">Billing</p>
             {client.stripe_customer_id ? (
               <Link
                 href={`https://dashboard.stripe.com/${client.stripe_customer_id.startsWith("cus_test") ? "test/" : ""}customers/${client.stripe_customer_id}`}
@@ -72,7 +72,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
                 rel="noreferrer"
                 className="mt-1 flex items-center gap-1 text-sm font-medium text-primary hover:underline"
               >
-                Open in Stripe <ExternalLink className="h-3 w-3" />
+                Open billing dashboard <ExternalLink className="h-3 w-3" />
               </Link>
             ) : (
               <p className="mt-1 text-sm text-muted-foreground">Not linked</p>
