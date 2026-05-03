@@ -7,7 +7,7 @@ export default function SignupPage() {
     <Card>
       <CardHeader>
         <CardTitle>Create your account</CardTitle>
-        <CardDescription>You&apos;ll get sales_user access by default.</CardDescription>
+        <CardDescription>Welcome to your Aylek sales floor.</CardDescription>
       </CardHeader>
       <CardContent>
         <SignupForm />

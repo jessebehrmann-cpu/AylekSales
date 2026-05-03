@@ -1,15 +1,24 @@
+import { createClient } from "@/lib/supabase/server";
+import { requireUser } from "@/lib/auth";
 import { PageHeader } from "@/components/page-header";
-import { Card, CardContent } from "@/components/ui/card";
+import { ImportWizard } from "./import-wizard";
 
-export default function ImportLeadsPage() {
+export default async function ImportLeadsPage() {
+  await requireUser();
+  const supabase = createClient();
+  const { data: clients } = await supabase
+    .from("clients")
+    .select("id, name")
+    .eq("status", "active")
+    .order("name");
+
   return (
     <>
-      <PageHeader title="Import leads" description="CSV upload with AI column mapping." />
-      <Card>
-        <CardContent className="py-16 text-center text-sm text-muted-foreground">
-          CSV upload + Claude-powered column mapper + duplicate detection ships in the next pass.
-        </CardContent>
-      </Card>
+      <PageHeader
+        title="Import leads"
+        description="Drop a CSV. Aylek maps the columns. You review and confirm."
+      />
+      <ImportWizard clients={clients ?? []} />
     </>
   );
 }

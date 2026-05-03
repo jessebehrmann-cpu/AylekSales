@@ -1,11 +1,10 @@
-import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
-import { CampaignWizard } from "./campaign-wizard";
+import { NewLeadForm } from "./new-lead-form";
 
-export default async function NewCampaignPage({
+export default async function NewLeadPage({
   searchParams,
 }: {
   searchParams: { client?: string };
@@ -14,23 +13,16 @@ export default async function NewCampaignPage({
   const supabase = createClient();
   const { data: clients } = await supabase
     .from("clients")
-    .select("id, name, notes")
+    .select("id, name")
     .eq("status", "active")
     .order("name");
 
-  if (!clients || clients.length === 0) {
-    redirect("/clients/new");
-  }
-
   return (
     <>
-      <PageHeader
-        title="New campaign"
-        description="3 steps: targeting → AI sequence → enrol leads + launch."
-      />
+      <PageHeader title="New lead" description="Add a single lead manually." />
       <Card>
         <CardContent className="pt-6">
-          <CampaignWizard clients={clients} defaultClientId={searchParams.client} />
+          <NewLeadForm clients={clients ?? []} defaultClientId={searchParams.client} />
         </CardContent>
       </Card>
     </>

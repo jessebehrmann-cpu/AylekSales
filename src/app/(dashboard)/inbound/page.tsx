@@ -22,7 +22,7 @@ export default async function InboundPage() {
     <>
       <PageHeader title="Inbound" description="Replies and new enquiries, AI-qualified." />
       {!emails || emails.length === 0 ? (
-        <EmptyState icon={Inbox} title="Inbox is quiet" description="Inbound enquiries land here once Resend forwards them." />
+        <EmptyState icon={Inbox} title="Inbox is quiet" description="Inbound enquiries land here as soon as your sales inbox starts receiving them." />
       ) : (
         <Card>
           <CardContent className="p-0">

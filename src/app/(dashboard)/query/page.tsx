@@ -15,8 +15,7 @@ export default function QueryPage() {
       <Card>
         <CardContent className="space-y-3 py-12 text-center">
           <p className="text-sm text-muted-foreground">
-            Claude-backed query → Supabase JS → human-readable answer.
-            Wires up in the next pass.
+            Ask Aylek anything about your pipeline.
           </p>
           <div className="mx-auto mt-6 grid max-w-xl gap-2 text-left text-sm">
             {SUGGESTIONS.map((s) => (
