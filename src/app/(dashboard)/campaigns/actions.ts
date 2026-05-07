@@ -148,6 +148,23 @@ export async function enrolAndLaunch(input: unknown): Promise<ActionResult<{ enr
       .maybeSingle();
     if (!campaignRow) return { ok: false, error: "Campaign not found" };
     const campaign = campaignRow as Campaign;
+
+    // Hard gate: client must have an approved playbook before any campaign launches.
+    if (campaign.client_id) {
+      const { data: approvedPlaybook } = await supabase
+        .from("playbooks")
+        .select("id")
+        .eq("client_id", campaign.client_id)
+        .eq("status", "approved")
+        .maybeSingle();
+      if (!approvedPlaybook) {
+        return {
+          ok: false,
+          error:
+            "This client has no approved playbook. Open Playbooks → submit one for approval before launching campaigns.",
+        };
+      }
+    }
     const stepsRaw = campaign.sequence_steps;
     if (!stepsRaw || !Array.isArray(stepsRaw) || stepsRaw.length === 0) {
       return { ok: false, error: "Save the sequence steps first" };

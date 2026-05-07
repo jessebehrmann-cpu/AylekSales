@@ -4,7 +4,7 @@ import { PageHeader } from "@/components/page-header";
 import { formatDateTime, formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
-import { Plus, Upload, Send } from "lucide-react";
+import { Plus, Upload, Send, Hand } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +26,7 @@ export default async function DashboardPage() {
     { count: meetingsThisMonth },
     { data: wonRows },
     { data: recentEvents },
+    { count: pendingApprovals },
   ] = await Promise.all([
     supabase.from("clients").select("id", { count: "exact", head: true }).eq("status", "active"),
     supabase.from("leads").select("id", { count: "exact", head: true }),
@@ -50,6 +51,10 @@ export default async function DashboardPage() {
       .eq("status", "accepted")
       .gte("responded_at", sinceMonth),
     supabase.from("events").select("*").order("created_at", { ascending: false }).limit(50),
+    supabase
+      .from("approvals")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "pending"),
   ]);
 
   const pipelineValue = (pipelineRows ?? []).reduce(
@@ -72,6 +77,22 @@ export default async function DashboardPage() {
 
   return (
     <>
+      {(pendingApprovals ?? 0) > 0 && (
+        <Link
+          href="/approvals"
+          className="mb-4 flex items-center gap-3 rounded-lg border border-amber-300/50 bg-amber-50 px-4 py-3 transition-colors hover:bg-amber-100/70"
+        >
+          <Hand className="h-5 w-5 text-amber-600" />
+          <p className="flex-1 text-sm text-amber-900">
+            <strong>{pendingApprovals} item{pendingApprovals === 1 ? "" : "s"} need your approval</strong> —
+            lead lists or strategy changes are blocked until you review.
+          </p>
+          <span className="rounded-md border border-amber-400/60 bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-900">
+            Review →
+          </span>
+        </Link>
+      )}
+
       <PageHeader
         title="Master dashboard"
         description="Aggregated across every active client."

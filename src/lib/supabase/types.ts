@@ -64,6 +64,28 @@ export type Database = {
         Update: Partial<AppQuery>;
         Relationships: [];
       };
+      playbooks: {
+        Row: Playbook;
+        Insert: Partial<Omit<Playbook, "client_id">> & { client_id: string };
+        Update: Partial<Playbook>;
+        Relationships: [];
+      };
+      playbook_versions: {
+        Row: PlaybookVersion;
+        Insert: Partial<PlaybookVersion>;
+        Update: Partial<PlaybookVersion>;
+        Relationships: [];
+      };
+      approvals: {
+        Row: Approval;
+        Insert: Partial<Omit<Approval, "client_id" | "type" | "title">> & {
+          client_id: string;
+          type: ApprovalType;
+          title: string;
+        };
+        Update: Partial<Approval>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;
@@ -241,5 +263,102 @@ export type AppQuery = {
   question: string;
   generated_query: string | null;
   result_summary: string | null;
+  created_at: string;
+};
+
+// ── Playbooks ──────────────────────────────────────────────────────────────
+
+export type PlaybookStatus = "draft" | "pending_approval" | "approved";
+export type ApprovalType = "lead_list" | "strategy_change";
+export type ApprovalStatus = "pending" | "approved" | "rejected";
+
+export type ICP = {
+  industries?: string[];
+  company_size?: string;
+  target_titles?: string[];
+  geography?: string[];
+  qualification_signal?: string;
+  disqualifiers?: string[];
+};
+
+export type PlaybookSequenceStep = {
+  step: number;
+  subject: string;
+  body: string;
+  delay_days: number;
+  branching_rules?: {
+    on_open?: { wait_days?: number };
+    on_no_reply?: { wait_days?: number };
+  };
+};
+
+export type EscalationRule = {
+  after_step: number;
+  action: "pause" | "notify" | "handoff";
+  notify_email?: string;
+};
+
+export type ChannelFlags = {
+  email: boolean;
+  phone: boolean;
+  linkedin: boolean;
+};
+
+export type Playbook = {
+  id: string;
+  client_id: string;
+  version: number;
+  status: PlaybookStatus;
+  icp: ICP;
+  sequences: PlaybookSequenceStep[];
+  escalation_rules: EscalationRule[];
+  channel_flags: ChannelFlags;
+  notes: string | null;
+  created_by: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  submitted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PlaybookVersion = {
+  id: string;
+  playbook_id: string;
+  client_id: string;
+  version: number;
+  status: PlaybookStatus;
+  snapshot: Json;
+  changed_by: string | null;
+  change_reason: string | null;
+  created_at: string;
+};
+
+export type LeadListPayload = {
+  lead_ids: string[];
+  campaign_id?: string;
+  source?: string;
+};
+
+export type StrategyChangePayload = {
+  playbook_id: string;
+  diff: Array<{ path: string; before: unknown; after: unknown }>;
+  reasoning?: string;
+  source?: string;
+};
+
+export type Approval = {
+  id: string;
+  client_id: string;
+  type: ApprovalType;
+  status: ApprovalStatus;
+  title: string;
+  summary: string | null;
+  payload: LeadListPayload | StrategyChangePayload | Record<string, unknown>;
+  related_playbook_id: string | null;
+  related_campaign_id: string | null;
+  created_by: string | null;
+  approved_by: string | null;
+  decided_at: string | null;
   created_at: string;
 };
