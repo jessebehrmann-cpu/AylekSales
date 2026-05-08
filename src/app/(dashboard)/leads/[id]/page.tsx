@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { DeleteLeadButton, NoteForm, StagePicker } from "./lead-actions";
+import { ApprovalBadge } from "@/components/approval-badge";
 import type { Lead, Email, Meeting, AppEvent } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
@@ -44,6 +45,7 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
         }
         actions={
           <div className="flex items-center gap-3">
+            <ApprovalBadge status={lead.approval_status} />
             <StagePicker leadId={lead.id} current={lead.stage} />
             <DeleteLeadButton leadId={lead.id} />
           </div>

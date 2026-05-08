@@ -75,6 +75,7 @@ export async function commitLeadImport(payload: unknown): Promise<ActionResult<{
         employees_estimate: parseIntOrNull(row.employees_estimate),
         website: nullish(row.website),
         source: "import",
+        approval_status: "approved",
       });
     }
 

@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Aylek Sales",
-  description: "AI-native fractional sales OS for commercial cleaning companies.",
+  description: "AI-native fractional sales OS — industry-agnostic, playbook-gated, closed-loop.",
 };
 
 export default function RootLayout({

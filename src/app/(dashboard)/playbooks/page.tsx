@@ -48,7 +48,7 @@ export default async function PlaybooksPage() {
         <EmptyState
           icon={BookOpen}
           title="No active clients yet"
-          description="Add a client first — every playbook is scoped to one cleaning company."
+          description="Add a client first — every playbook is scoped to one client."
           action={
             <Button asChild>
               <Link href="/clients/new">Add a client</Link>

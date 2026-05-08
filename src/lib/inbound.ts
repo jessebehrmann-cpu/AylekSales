@@ -1,5 +1,11 @@
 import { createServiceClient } from "@/lib/supabase/server";
-import { anthropic, ANTHROPIC_MODEL, parseJsonResponse } from "@/lib/anthropic";
+import {
+  anthropic,
+  ANTHROPIC_MODEL,
+  isAnthropicKeyMissing,
+  isAnthropicUnavailableError,
+  parseJsonResponse,
+} from "@/lib/anthropic";
 import { resend, FROM_EMAIL } from "@/lib/resend";
 import { logEvent } from "@/lib/events";
 
@@ -99,9 +105,14 @@ export async function processInboundEmail(payload: InboundEmail): Promise<void> 
   });
 
   // ── AI qualification ──────────────────────────────────────────────────────
+  if (isAnthropicKeyMissing()) {
+    console.warn("[inbound] ANTHROPIC_API_KEY missing — skipping AI qualification");
+    return;
+  }
+
   try {
     const system =
-      "You are an AI sales assistant for a commercial cleaning company. You assess inbound enquiries quickly and write warm, direct Australian responses. Never quote prices.";
+      "You are an AI sales assistant for a B2B company. You assess inbound enquiries quickly and write warm, direct responses. Never quote prices.";
 
     const prompt = `Inbound email from ${payload.from_name || fromEmail} <${fromEmail}>:
 
@@ -110,9 +121,9 @@ Subject: ${payload.subject ?? "(no subject)"}
 ${payload.text ?? "(no body)"}
 
 Assess:
-1. Is this a genuine commercial cleaning enquiry? (true/false)
+1. Is this a genuine inbound sales enquiry? (true/false)
 2. Lead quality: "hot" / "warm" / "cold"
-3. Estimated contract size: "small" (<$500/mo) / "medium" ($500-2k/mo) / "large" (>$2k/mo)
+3. Estimated contract size: "small" / "medium" / "large"
 4. Write a suggested response email body (3-5 sentences max, no greeting line, sign off as "Aylek Sales").
 5. Next action: "send_quote" / "book_meeting" / "request_more_info" / "disqualify"
 6. One sentence of reasoning.
@@ -182,6 +193,10 @@ Return ONLY valid JSON with these keys: is_genuine, quality, estimated_size, sug
       }
     }
   } catch (qualifyErr) {
-    console.error("[inbound] qualification failed", qualifyErr);
+    if (isAnthropicUnavailableError(qualifyErr)) {
+      console.warn("[inbound] Anthropic unavailable — qualification skipped");
+    } else {
+      console.error("[inbound] qualification failed", qualifyErr);
+    }
   }
 }

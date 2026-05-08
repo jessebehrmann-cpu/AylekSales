@@ -19,19 +19,28 @@ export default async function ApprovalsPage({
   const supabase = createClient();
   const status = (searchParams.status as Approval["status"] | undefined) ?? "pending";
 
-  const { data: rows } = await supabase
-    .from("approvals")
-    .select("*, clients(name)")
-    .eq("status", status)
-    .order("created_at", { ascending: false })
-    .limit(100);
+  const [{ data: rows, error: rowsErr }, pendingCountRes, approvedCountRes, rejectedCountRes] = await Promise.all([
+    supabase
+      .from("approvals")
+      .select("*, clients(name)")
+      .eq("status", status)
+      .order("created_at", { ascending: false })
+      .limit(100),
+    supabase.from("approvals").select("id", { count: "exact", head: true }).eq("status", "pending"),
+    supabase.from("approvals").select("id", { count: "exact", head: true }).eq("status", "approved"),
+    supabase.from("approvals").select("id", { count: "exact", head: true }).eq("status", "rejected"),
+  ]);
+
+  if (rowsErr) {
+    console.error("[approvals] fetch failed", rowsErr);
+  }
 
   const approvals = (rows ?? []) as unknown as ApprovalRow[];
 
-  const tabs: Array<{ key: Approval["status"]; label: string }> = [
-    { key: "pending", label: "Pending" },
-    { key: "approved", label: "Approved" },
-    { key: "rejected", label: "Rejected" },
+  const tabs: Array<{ key: Approval["status"]; label: string; count: number }> = [
+    { key: "pending", label: "Pending", count: pendingCountRes.count ?? 0 },
+    { key: "approved", label: "Approved", count: approvedCountRes.count ?? 0 },
+    { key: "rejected", label: "Rejected", count: rejectedCountRes.count ?? 0 },
   ];
 
   return (
@@ -46,13 +55,20 @@ export default async function ApprovalsPage({
           <a
             key={t.key}
             href={`/approvals?status=${t.key}`}
-            className={`rounded-full border px-3 py-1 text-xs font-medium ${
+            className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${
               status === t.key
                 ? "border-primary bg-primary/10 text-primary"
                 : "border-border bg-background text-muted-foreground hover:bg-muted"
             }`}
           >
-            {t.label}
+            <span>{t.label}</span>
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] ${
+                status === t.key ? "bg-primary/20" : "bg-muted"
+              }`}
+            >
+              {t.count}
+            </span>
           </a>
         ))}
       </div>

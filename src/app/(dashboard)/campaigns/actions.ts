@@ -4,7 +4,14 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth";
-import { anthropic, ANTHROPIC_MODEL, parseJsonResponse } from "@/lib/anthropic";
+import {
+  anthropic,
+  ANTHROPIC_KEY_MISSING_MESSAGE,
+  ANTHROPIC_MODEL,
+  isAnthropicKeyMissing,
+  isAnthropicUnavailableError,
+  parseJsonResponse,
+} from "@/lib/anthropic";
 import { logEvent } from "@/lib/events";
 import { actionError, type ActionResult } from "@/lib/actions";
 import type { Campaign, SequenceStep } from "@/lib/supabase/types";
@@ -61,7 +68,44 @@ const GenerateSchema = z.object({
   client_notes: z.string().max(4000).optional().or(z.literal("")),
 });
 
-export async function generateSequence(input: unknown): Promise<ActionResult<{ steps: SequenceStep[] }>> {
+/** Returns a generic 3-step placeholder sequence so the wizard stays usable
+ *  even when the Anthropic API is unavailable. The user can edit each step. */
+function placeholderSequence(input: {
+  client_name: string;
+  target_title: string;
+  target_industry: string;
+}): SequenceStep[] {
+  return [
+    {
+      step: 1,
+      delay_days: 0,
+      subject: `Quick question about {{company_name}}`,
+      body: `Hi {{contact_name}},\n\nI'm reaching out from ${input.client_name}. We work with ${input.target_industry} teams to ${"<replace with the specific outcome you deliver>"}, and I thought {{company_name}} might be a fit.\n\nOpen to a quick chat?`,
+    },
+    {
+      step: 2,
+      delay_days: 4,
+      subject: `Following up`,
+      body: `Hi {{contact_name}},\n\nFollowing up on my note from earlier this week. Most ${input.target_title}s we talk to are weighing ${"<insert a real pain point or trigger>"} right now.\n\nWorth a 15-minute call this week or next?`,
+    },
+    {
+      step: 3,
+      delay_days: 9,
+      subject: `Last note from me`,
+      body: `Hi {{contact_name}},\n\nDon't want to be a pest — last note. If now isn't the right time, no problem at all. If there's someone else at {{company_name}} who handles ${"<area>"}, I'd appreciate a quick redirect.\n\nThanks for considering.`,
+    },
+  ];
+}
+
+export type GenerateResult = {
+  steps: SequenceStep[];
+  /** "ai" → Claude generated, "placeholder" → fell back, no key or API down. */
+  source: "ai" | "placeholder";
+  /** Surfaceable warning when source === "placeholder". */
+  warning?: string;
+};
+
+export async function generateSequence(input: unknown): Promise<ActionResult<GenerateResult>> {
   try {
     await requireUser();
     const parsed = GenerateSchema.safeParse(input);
@@ -69,29 +113,58 @@ export async function generateSequence(input: unknown): Promise<ActionResult<{ s
       return { ok: false, error: "Need client name, target title, and target industry to generate." };
     }
 
-    const system =
-      "You are an expert B2B cold email copywriter for commercial cleaning in Australia. Rules: max 4 sentences per email body; no corporate speak; lead with a specific pain point the buyer experiences; one clear CTA per email; Australian tone — direct, warm, not pushy; never mention price in cold outreach; steps 2 and 3 reference prior outreach.";
+    if (isAnthropicKeyMissing()) {
+      return {
+        ok: true,
+        steps: placeholderSequence(parsed.data),
+        source: "placeholder",
+        warning: ANTHROPIC_KEY_MISSING_MESSAGE,
+      };
+    }
 
-    const prompt = `Write a 3-step cold email sequence for ${parsed.data.client_name}, a commercial cleaning company in Sydney.
+    const system =
+      "You are an expert B2B cold email copywriter. Rules: max 4 sentences per email body; no corporate speak; lead with a specific pain point the buyer experiences; one clear CTA per email; warm and direct tone, not pushy; never mention price in cold outreach; steps 2 and 3 reference prior outreach.";
+
+    const prompt = `Write a 3-step cold email sequence on behalf of ${parsed.data.client_name}.
 Target buyer: ${parsed.data.target_title} at ${parsed.data.target_industry} businesses.
-Client's key differentiator: ${parsed.data.client_notes || "(none provided — pick a credible angle)"}
+Sender's key differentiator / offer notes: ${parsed.data.client_notes || "(none provided — pick a credible angle)"}
 Delays: Step 1 = Day 0, Step 2 = Day 4, Step 3 = Day 9.
+
+Personalisation tokens you may use: {{contact_name}}, {{company_name}}.
 
 Return ONLY valid JSON, no markdown:
 [{"step":1,"delay_days":0,"subject":"...","body":"..."},{"step":2,"delay_days":4,"subject":"...","body":"..."},{"step":3,"delay_days":9,"subject":"...","body":"..."}]`;
 
-    const response = await anthropic.messages.create({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1500,
-      system,
-      messages: [{ role: "user", content: prompt }],
-    });
-    const text = response.content[0]?.type === "text" ? response.content[0].text : "";
-    const parsedSteps = SequenceSchema.safeParse(parseJsonResponse(text));
-    if (!parsedSteps.success) {
-      return { ok: false, error: "AI returned invalid sequence shape — try again." };
+    try {
+      const response = await anthropic.messages.create({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1500,
+        system,
+        messages: [{ role: "user", content: prompt }],
+      });
+      const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+      const parsedSteps = SequenceSchema.safeParse(parseJsonResponse(text));
+      if (!parsedSteps.success) {
+        // Bad shape from the model — surface a placeholder rather than blocking
+        return {
+          ok: true,
+          steps: placeholderSequence(parsed.data),
+          source: "placeholder",
+          warning: "AI returned an invalid sequence shape — using a placeholder. Edit the steps and try regenerating.",
+        };
+      }
+      return { ok: true, steps: parsedSteps.data, source: "ai" };
+    } catch (apiErr) {
+      if (isAnthropicUnavailableError(apiErr)) {
+        return {
+          ok: true,
+          steps: placeholderSequence(parsed.data),
+          source: "placeholder",
+          warning: ANTHROPIC_KEY_MISSING_MESSAGE,
+        };
+      }
+      throw apiErr;
     }
-    return { ok: true, steps: parsedSteps.data };
   } catch (err) {
     return actionError(err);
   }

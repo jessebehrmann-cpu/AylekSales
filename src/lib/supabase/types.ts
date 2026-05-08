@@ -159,6 +159,8 @@ export type AppUser = {
   created_at: string;
 };
 
+export type LeadApprovalStatus = "pending_approval" | "approved" | "rejected";
+
 export type Lead = {
   id: string;
   client_id: string | null;
@@ -173,6 +175,7 @@ export type Lead = {
   website: string | null;
   source: "import" | "manual" | "inbound" | "ai_enriched";
   stage: LeadStage;
+  approval_status: LeadApprovalStatus;
   contract_value: number | null;
   assigned_to: string | null;
   last_contacted_at: string | null;
@@ -286,6 +289,8 @@ export type PlaybookSequenceStep = {
   subject: string;
   body: string;
   delay_days: number;
+  /** Index into Playbook.team_members for the From: name on this step. */
+  sender_index?: number | null;
   branching_rules?: {
     on_open?: { wait_days?: number };
     on_no_reply?: { wait_days?: number };
@@ -304,6 +309,44 @@ export type ChannelFlags = {
   linkedin: boolean;
 };
 
+export type Strategy = {
+  value_proposition?: string;
+  key_messages?: string[];
+  proof_points?: string[];
+  objection_responses?: Array<{ objection: string; response: string }>;
+};
+
+export type VoiceTone = {
+  tone_descriptors?: string[];
+  writing_style?: string;
+  avoid?: string[];
+  example_phrases?: string[];
+};
+
+export type ReplyKind =
+  | "interested"
+  | "not_now"
+  | "wrong_person"
+  | "unsubscribe"
+  | "objection";
+
+export type ReplyStrategy = Partial<
+  Record<
+    ReplyKind,
+    {
+      action?: string;
+      template?: string;
+    }
+  >
+>;
+
+export type TeamMember = {
+  id: string;
+  name: string;
+  title: string;
+  email: string;
+};
+
 export type Playbook = {
   id: string;
   client_id: string;
@@ -313,6 +356,10 @@ export type Playbook = {
   sequences: PlaybookSequenceStep[];
   escalation_rules: EscalationRule[];
   channel_flags: ChannelFlags;
+  strategy: Strategy;
+  voice_tone: VoiceTone;
+  reply_strategy: ReplyStrategy;
+  team_members: TeamMember[];
   notes: string | null;
   created_by: string | null;
   approved_by: string | null;

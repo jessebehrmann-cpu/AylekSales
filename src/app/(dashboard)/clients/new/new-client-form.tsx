@@ -18,14 +18,25 @@ export function NewClientForm() {
     e.preventDefault();
     setError(null);
     const fd = new FormData(e.currentTarget);
+    console.log("[new-client-form] submitting", Object.fromEntries(fd));
     start(async () => {
-      const result = await createClient_(fd);
-      if (!result.ok) {
-        setError(result.error);
-        return;
+      try {
+        const result = await createClient_(fd);
+        console.log("[new-client-form] action returned", result);
+        if (!result.ok) {
+          setError(result.error);
+          return;
+        }
+        if (result.stripe_warning) {
+          // surface warning briefly before redirect so the operator sees it
+          alert(result.stripe_warning);
+        }
+        router.push(`/clients/${result.id}`);
+        router.refresh();
+      } catch (err) {
+        console.error("[new-client-form] action threw", err);
+        setError(err instanceof Error ? err.message : String(err));
       }
-      router.push(`/clients/${result.id}`);
-      router.refresh();
     });
   }
 
@@ -58,7 +69,7 @@ export function NewClientForm() {
 
       <div className="space-y-2">
         <Label htmlFor="notes">Notes</Label>
-        <Textarea id="notes" name="notes" rows={4} placeholder="Anything internal — differentiator, vibe, edge cases…" />
+        <Textarea id="notes" name="notes" rows={4} placeholder="Anything internal — value prop, differentiator, edge cases…" />
       </div>
 
       <div className="flex items-center justify-end gap-2">

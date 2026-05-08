@@ -34,6 +34,7 @@ export function ImportWizard({ clients }: { clients: { id: string; name: string 
   const [mapping, setMapping] = useState<Mapping>({});
   const [clientId, setClientId] = useState<string>("");
   const [aiPending, setAiPending] = useState(false);
+  const [aiWarning, setAiWarning] = useState<string | null>(null);
   const [commitPending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<{ inserted: number; skipped: number } | null>(null);
@@ -59,6 +60,7 @@ export function ImportWizard({ clients }: { clients: { id: string; name: string 
 
         // Kick off AI mapping
         setAiPending(true);
+        setAiWarning(null);
         try {
           const res = await fetch("/api/leads/map", {
             method: "POST",
@@ -66,12 +68,14 @@ export function ImportWizard({ clients }: { clients: { id: string; name: string 
             body: JSON.stringify({ headers: fileHeaders, rows: result.data.slice(0, 3) }),
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const json = (await res.json()) as { mapping: Mapping };
+          const json = (await res.json()) as { mapping: Mapping; warning?: string };
           setMapping(json.mapping);
+          if (json.warning) setAiWarning(json.warning);
         } catch (e) {
           // Fallback: empty mapping; user maps manually
           console.error(e);
           setMapping({});
+          setAiWarning("AI mapping failed — map the columns manually below.");
         } finally {
           setAiPending(false);
         }
@@ -154,6 +158,12 @@ export function ImportWizard({ clients }: { clients: { id: string; name: string 
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            {aiWarning && (
+              <Alert variant="default" className="border-amber-300/50 bg-amber-50 text-amber-900">
+                {aiWarning}
+              </Alert>
+            )}
+
             <div className="space-y-1.5">
               <Label htmlFor="client">Assign to client (optional)</Label>
               <Select value={clientId} onValueChange={setClientId}>

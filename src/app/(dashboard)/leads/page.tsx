@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/empty-state";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { ApprovalBadge } from "@/components/approval-badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { Users, Upload, Plus } from "lucide-react";
 
@@ -114,13 +115,14 @@ export default async function LeadsPage({
                   <TableHead>Contact</TableHead>
                   <TableHead>Title</TableHead>
                   <TableHead>Suburb</TableHead>
+                  <TableHead>Approval</TableHead>
                   <TableHead>Stage</TableHead>
                   <TableHead>Last contact</TableHead>
                   <TableHead className="text-right">Value</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {leads.map((l: { id: string; company_name: string; contact_name: string | null; title: string | null; suburb: string | null; stage: string; last_contacted_at: string | null; contract_value: number | null; clients?: { name: string } | null }) => (
+                {leads.map((l: { id: string; company_name: string; contact_name: string | null; title: string | null; suburb: string | null; stage: string; approval_status: "pending_approval" | "approved" | "rejected"; last_contacted_at: string | null; contract_value: number | null; clients?: { name: string } | null }) => (
                   <TableRow key={l.id}>
                     <TableCell>
                       <Link href={`/leads/${l.id}`} className="font-medium hover:underline">{l.company_name}</Link>
@@ -129,6 +131,9 @@ export default async function LeadsPage({
                     <TableCell>{l.contact_name ?? "—"}</TableCell>
                     <TableCell>{l.title ?? "—"}</TableCell>
                     <TableCell>{l.suburb ?? "—"}</TableCell>
+                    <TableCell>
+                      <ApprovalBadge status={l.approval_status} />
+                    </TableCell>
                     <TableCell>
                       <Badge variant={stageVariants[l.stage] ?? "muted"}>{l.stage}</Badge>
                     </TableCell>

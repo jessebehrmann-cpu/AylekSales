@@ -7,11 +7,12 @@ export default function LandingPage() {
         Aylek Sales
       </p>
       <h1 className="max-w-2xl text-4xl font-semibold tracking-tight text-foreground sm:text-5xl">
-        AI-native fractional sales for commercial cleaning companies.
+        AI-native fractional sales, run as a service.
       </h1>
       <p className="mt-6 max-w-xl text-base text-muted-foreground">
         Inbound handling, outbound sequences, pipeline CRM, and a queryable
-        dashboard — run as one closed-loop service.
+        dashboard — closed-loop, industry-agnostic, gated behind an approved
+        playbook for every client.
       </p>
       <div className="mt-10 flex items-center gap-4">
         <Link

@@ -31,8 +31,8 @@ type Lead = { id: string; company_name: string; contact_name: string | null; ema
 const DEFAULT_STEP1: Step1 = {
   name: "",
   client_id: "",
-  target_title: "Facilities Manager",
-  target_industry: "professional services",
+  target_title: "Head of Operations",
+  target_industry: "B2B services",
   client_notes: "",
 };
 
@@ -49,6 +49,7 @@ export function CampaignWizard({
   const [campaignId, setCampaignId] = useState<string | null>(null);
   const [steps, setSteps] = useState<SequenceStep[]>([]);
   const [aiPending, setAiPending] = useState(false);
+  const [aiWarning, setAiWarning] = useState<string | null>(null);
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
@@ -81,6 +82,7 @@ export function CampaignWizard({
 
   async function onGenerate() {
     setError(null);
+    setAiWarning(null);
     setAiPending(true);
     const clientName = clients.find((c) => c.id === step1.client_id)?.name ?? "";
     const result = await generateSequence({
@@ -95,6 +97,9 @@ export function CampaignWizard({
       return;
     }
     setSteps(result.steps);
+    if (result.source === "placeholder" && result.warning) {
+      setAiWarning(result.warning);
+    }
   }
 
   async function next2() {
@@ -144,7 +149,7 @@ export function CampaignWizard({
               rows={3}
               value={step1.client_notes}
               onChange={(e) => setStep1({ ...step1, client_notes: e.target.value })}
-              placeholder="e.g. eco-certified, 24/7 callouts, 10 years in Sydney CBD…"
+              placeholder="e.g. value prop, differentiator, recent wins, anything to anchor the message…"
             />
           </div>
         </div>
@@ -167,6 +172,12 @@ export function CampaignWizard({
 
         {aiPending && steps.length === 0 && (
           <Alert>Aylek is drafting a 3-step sequence based on your inputs…</Alert>
+        )}
+
+        {aiWarning && (
+          <Alert variant="default" className="border-amber-300/50 bg-amber-50 text-amber-900">
+            <strong>{aiWarning}</strong> A placeholder sequence has been loaded so you can edit it manually and proceed.
+          </Alert>
         )}
 
         {error && <Alert variant="destructive">{error}</Alert>}

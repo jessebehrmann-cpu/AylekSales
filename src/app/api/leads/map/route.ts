@@ -1,5 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { anthropic, ANTHROPIC_MODEL, parseJsonResponse } from "@/lib/anthropic";
+import {
+  anthropic,
+  ANTHROPIC_KEY_MISSING_MESSAGE,
+  ANTHROPIC_MODEL,
+  isAnthropicKeyMissing,
+  isAnthropicUnavailableError,
+  parseJsonResponse,
+} from "@/lib/anthropic";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -36,6 +43,13 @@ export async function POST(req: NextRequest) {
   const sample = (body.rows ?? []).slice(0, 3);
   const targets = TARGET_FIELDS.join(", ");
 
+  if (isAnthropicKeyMissing()) {
+    const empty: Record<string, string | null> = Object.fromEntries(
+      TARGET_FIELDS.map((f) => [f, null]),
+    );
+    return NextResponse.json({ mapping: empty, warning: ANTHROPIC_KEY_MISSING_MESSAGE });
+  }
+
   const prompt = `You are mapping CSV columns to a lead schema.
 
 Target fields: ${targets}
@@ -60,6 +74,12 @@ For each target field, return the BEST matching CSV header (verbatim) or null if
     return NextResponse.json({ mapping });
   } catch (err) {
     console.error("[leads/map] error", err);
+    if (isAnthropicUnavailableError(err)) {
+      const empty: Record<string, string | null> = Object.fromEntries(
+        TARGET_FIELDS.map((f) => [f, null]),
+      );
+      return NextResponse.json({ mapping: empty, warning: ANTHROPIC_KEY_MISSING_MESSAGE });
+    }
     return NextResponse.json({ error: "Mapping failed" }, { status: 500 });
   }
 }

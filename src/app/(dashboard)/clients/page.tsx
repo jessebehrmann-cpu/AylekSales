@@ -22,7 +22,7 @@ export default async function ClientsPage() {
     <>
       <PageHeader
         title="Clients"
-        description="Cleaning companies on retainer."
+        description="B2B businesses on retainer."
         actions={
           <Button asChild size="sm">
             <Link href="/clients/new">
@@ -35,7 +35,7 @@ export default async function ClientsPage() {
         <EmptyState
           icon={Building2}
           title="No clients yet"
-          description="Onboard your first cleaning company to start running campaigns."
+          description="Onboard your first client to start running campaigns."
           action={
             <Button asChild>
               <Link href="/clients/new">Add a client</Link>

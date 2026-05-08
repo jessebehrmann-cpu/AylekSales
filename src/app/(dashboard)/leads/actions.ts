@@ -60,7 +60,7 @@ export async function createLead(formData: FormData): Promise<ActionResult<{ id:
 
     const { data: row, error } = await supabase
       .from("leads")
-      .insert({ ...data, source: "manual" })
+      .insert({ ...data, source: "manual", approval_status: "approved" })
       .select("id, company_name, client_id")
       .single();
 

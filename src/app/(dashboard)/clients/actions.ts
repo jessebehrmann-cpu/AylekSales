@@ -35,23 +35,31 @@ function blankToNull<T extends Record<string, unknown>>(o: T): T {
  * spin up a Stripe Customer and a recurring monthly Subscription priced at
  * the retainer amount in AUD. retainer_amount is stored + entered as DOLLARS.
  */
-export async function createClient_(formData: FormData): Promise<ActionResult<{ id: string }>> {
+export async function createClient_(
+  formData: FormData,
+): Promise<ActionResult<{ id: string; stripe_warning?: string }>> {
+  console.log("[clients/create] action invoked");
   try {
     const user = await requireAdmin();
+    console.log("[clients/create] auth ok, user", user.auth.id);
 
     const parsed = ClientSchema.safeParse(Object.fromEntries(formData));
     if (!parsed.success) {
-      return { ok: false, error: parsed.error.issues.map((i) => i.message).join("; ") };
+      console.warn("[clients/create] zod validation failed", parsed.error.issues);
+      return { ok: false, error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") };
     }
     const data = blankToNull(parsed.data);
+    console.log("[clients/create] validated payload", { name: data.name, email: !!data.email, retainer: data.retainer_amount });
 
     const supabase = createClient();
 
     let stripeCustomerId: string | null = null;
     let stripeSubId: string | null = null;
+    let stripeWarning: string | undefined;
 
     if (process.env.STRIPE_SECRET_KEY && data.email) {
       try {
+        console.log("[clients/create] creating Stripe customer");
         const customer = await stripe.customers.create({
           name: data.name,
           email: data.email as string,
@@ -59,6 +67,7 @@ export async function createClient_(formData: FormData): Promise<ActionResult<{ 
           metadata: { app: "aylek-sales", owner_name: (data.owner_name as string) ?? "" },
         });
         stripeCustomerId = customer.id;
+        console.log("[clients/create] stripe customer", stripeCustomerId);
 
         if (data.retainer_amount > 0) {
           const product = await stripe.products.create({
@@ -82,25 +91,30 @@ export async function createClient_(formData: FormData): Promise<ActionResult<{ 
             metadata: { app: "aylek-sales" },
           });
           stripeSubId = sub.id;
+          console.log("[clients/create] stripe subscription", stripeSubId);
         }
       } catch (stripeErr) {
-        console.error("[clients] stripe create failed", stripeErr);
-        // Don't fail the whole create — record the client without Stripe so
-        // the operator can fix Stripe config later and reconcile.
+        console.error("[clients/create] STRIPE FAILED — continuing without Stripe IDs", stripeErr);
+        stripeWarning = `Stripe setup failed (${stripeErr instanceof Error ? stripeErr.message : "unknown"}). Client saved without billing — fix Stripe config and edit the client to retry.`;
       }
+    } else if (!data.email) {
+      console.log("[clients/create] no email supplied — skipping Stripe");
+    } else if (!process.env.STRIPE_SECRET_KEY) {
+      console.log("[clients/create] STRIPE_SECRET_KEY not set — skipping Stripe");
     }
 
+    console.log("[clients/create] inserting client row");
     const { data: row, error } = await supabase
       .from("clients")
       .insert({
         name: data.name,
-        owner_name: data.owner_name as string | null,
-        email: data.email as string | null,
-        phone: data.phone as string | null,
-        suburb: data.suburb as string | null,
+        owner_name: (data.owner_name as string | null | undefined) ?? null,
+        email: (data.email as string | null | undefined) ?? null,
+        phone: (data.phone as string | null | undefined) ?? null,
+        suburb: (data.suburb as string | null | undefined) ?? null,
         retainer_amount: data.retainer_amount,
         revenue_share_pct: data.revenue_share_pct,
-        notes: data.notes as string | null,
+        notes: (data.notes as string | null | undefined) ?? null,
         stripe_customer_id: stripeCustomerId,
         stripe_subscription_id: stripeSubId,
       })
@@ -108,8 +122,10 @@ export async function createClient_(formData: FormData): Promise<ActionResult<{ 
       .single();
 
     if (error || !row) {
+      console.error("[clients/create] insert failed", error);
       return { ok: false, error: error?.message ?? "Insert failed" };
     }
+    console.log("[clients/create] inserted", row.id);
 
     await logEvent({
       event_type: "ai_action",
@@ -126,8 +142,9 @@ export async function createClient_(formData: FormData): Promise<ActionResult<{ 
 
     revalidatePath("/clients");
     revalidatePath("/dashboard");
-    return { ok: true, id: row.id };
+    return { ok: true, id: row.id, stripe_warning: stripeWarning };
   } catch (err) {
+    console.error("[clients/create] uncaught", err);
     return actionError(err);
   }
 }

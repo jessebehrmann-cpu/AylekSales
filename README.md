@@ -1,7 +1,8 @@
 # Aylek Sales
 
-AI-native fractional sales OS for commercial cleaning companies — inbound handling,
-outbound sequences, pipeline CRM, and a queryable dashboard, all running closed-loop.
+AI-native fractional sales OS — inbound handling, outbound sequences, pipeline CRM, and
+a queryable dashboard, all running closed-loop. Industry-agnostic; every client's outbound
+work is gated behind an HOS-approved playbook.
 
 ## Stack
 Next.js 14 · TypeScript · Tailwind · Supabase (Postgres + RLS) · Anthropic Claude · Resend · Stripe · Vercel
