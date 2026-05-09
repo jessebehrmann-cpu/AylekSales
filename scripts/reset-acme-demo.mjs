@@ -112,23 +112,30 @@ const stages = playbook?.sales_process ?? [];
 if (stages.length < 5) {
   console.error(`    live playbook only has ${stages.length} stages; need at least 5. Aborting distribution.`);
 } else {
-  // Spread across at least 5 stages; favour real-funnel shape:
-  //   prospect (the new ones), outreach, book_meeting, have_meeting, send_proposal, payment
-  // Cycle through this preferred sequence so a small lead set still hits 5+ stages.
-  const desired = [
+  // Pin specific demo leads to specific stages so the human-gate flow is
+  // always exercisable on Meridian Health (Have Meeting is the canonical
+  // human stage). Everything else cycles across the rest so the funnel has
+  // counts at multiple bars.
+  const PINNED = {
+    "Meridian Health": "have_meeting", // proves the human gate + Mark Complete button
+  };
+  const cycle = [
     "prospect",
     "outreach",
     "book_meeting",
-    "have_meeting", // human stage — proves the gate
     "send_proposal",
     "payment",
     "handover",
   ].filter((id) => stages.some((s) => s.id === id));
 
   const updates = [];
-  for (let i = 0; i < otherLeads.length; i++) {
-    const stageId = desired[i % desired.length];
-    updates.push({ leadId: otherLeads[i].id, name: otherLeads[i].company_name, stageId });
+  let cycleIdx = 0;
+  for (const lead of otherLeads) {
+    const pinned = PINNED[lead.company_name];
+    const stageId = pinned && stages.some((s) => s.id === pinned)
+      ? pinned
+      : cycle[cycleIdx++ % cycle.length];
+    updates.push({ leadId: lead.id, name: lead.company_name, stageId });
   }
 
   for (const u of updates) {
@@ -136,7 +143,41 @@ if (stages.length < 5) {
       method: "PATCH",
       body: JSON.stringify({ process_stage_id: u.stageId }),
     });
-    console.log(`    ${u.name.padEnd(28)} → ${u.stageId}`);
+    const stageDef = stages.find((s) => s.id === u.stageId);
+    const isHuman = (stageDef?.agent ?? "").toLowerCase() === "human";
+
+    // For human stages, replicate the side effects that moveLeadToProcessStage
+    // would normally fire (cancel pending emails + open a human_stage_task
+    // approval) so the demo state matches what the app produces in real use.
+    if (isHuman) {
+      await rest(`emails?lead_id=eq.${u.leadId}&status=eq.pending`, { method: "DELETE" });
+
+      const existingTask = (
+        await rest(
+          `approvals?client_id=eq.${acmeId}&type=eq.human_stage_task&status=eq.pending&payload->>stage_id=eq.${u.stageId}&payload->>lead_id=eq.${u.leadId}&select=id&limit=1`,
+        )
+      )[0];
+      if (!existingTask) {
+        await rest(`approvals`, {
+          method: "POST",
+          body: JSON.stringify({
+            client_id: acmeId,
+            type: "human_stage_task",
+            status: "pending",
+            title: `${u.name}: ${stageDef.name}`,
+            summary: `Lead reached a human-owned stage. Automation paused — HOS to mark the stage complete.`,
+            payload: {
+              stage_id: u.stageId,
+              stage_name: stageDef.name,
+              agent: stageDef.agent,
+              lead_id: u.leadId,
+              message: `Lead reached "${stageDef.name}" — automation paused, awaiting human action.`,
+            },
+          }),
+        });
+      }
+    }
+    console.log(`    ${u.name.padEnd(28)} → ${u.stageId}${isHuman ? "  (human stage — task approval created)" : ""}`);
   }
 
   // Confirm distribution: count distinct stages used

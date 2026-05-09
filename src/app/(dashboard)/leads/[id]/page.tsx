@@ -11,7 +11,7 @@ import { NoteForm } from "./lead-actions";
 import { LeadDetailHeaderActions } from "./lead-detail-header";
 import { LeadTimelineCard } from "./lead-timeline";
 import { CommunicationHistory } from "./communication-history";
-import type { Lead, Email, Meeting, AppEvent, MeetingNote, SalesProcessStage } from "@/lib/supabase/types";
+import type { Lead, Email, Meeting, AppEvent, Approval, MeetingNote, SalesProcessStage } from "@/lib/supabase/types";
 import { inferProcessStageFromLeadStage, isHumanStage } from "@/lib/playbook-defaults";
 
 export const dynamic = "force-dynamic";
@@ -35,6 +35,20 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
   const emails = emailsRes.data as Email[] | null;
   const meetings = meetingsRes.data as Meeting[] | null;
   const meetingNotes = meetingNotesRes.data as MeetingNote[] | null;
+
+  // Pull proposal_review approvals tied to this lead's meeting notes so the
+  // Communication history's Proposals section has real data to render.
+  const noteApprovalIds = (meetingNotes ?? [])
+    .map((n) => n.related_approval_id)
+    .filter((id): id is string => !!id);
+  let proposalApprovals: Approval[] = [];
+  if (noteApprovalIds.length > 0) {
+    const { data: pr } = await supabase
+      .from("approvals")
+      .select("*")
+      .in("id", noteApprovalIds);
+    proposalApprovals = (pr ?? []) as Approval[];
+  }
 
   if (!lead) notFound();
 
@@ -102,6 +116,7 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
             events={events ?? []}
             meetings={meetings ?? []}
             meetingNotes={meetingNotes ?? []}
+            proposalApprovals={proposalApprovals}
           />
 
           <Card>

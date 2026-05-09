@@ -5,45 +5,42 @@ import {
   ArrowLeftCircle,
   ArrowRightCircle,
   CalendarDays,
-  CheckCircle2,
   ClipboardList,
   Eye,
   FileText,
   MessageCircle,
-  StickyNote,
+  Send,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
-import type { AppEvent, Email, Meeting, MeetingNote } from "@/lib/supabase/types";
+import { labelForAgent } from "@/lib/playbook-defaults";
+import type {
+  AppEvent,
+  Approval,
+  Email,
+  Meeting,
+  MeetingNote,
+  ProposalReviewPayload,
+} from "@/lib/supabase/types";
 
 /**
- * Unified Communication History — single chronological feed combining
- * outbound + inbound emails, replies, meeting bookings, captured meeting
- * notes, sales-process stage changes (with agent attribution), and
- * internal notes. Each row shows type · preview · timestamp · who.
+ * Communication history — 4 grouped sections that read like a deal timeline:
+ *   1. Outreach        — emails sent + replies + opens + bounces
+ *   2. Meetings        — meeting bookings + captured meeting notes
+ *   3. Proposals       — proposal_review approvals (drafts awaiting send)
+ *   4. Stage changes   — process-stage advancements with agent attribution
  *
- * Renders the "Email history" panel from the previous design, expanded.
+ * Inside each section, items are oldest → newest top to bottom (so the deal
+ * reads as a story). Plain-English labels — no `stage_changed` in the UI.
  */
+
 type Item = {
-  ts: string; // ISO
-  type:
-    | "email_outbound"
-    | "email_inbound"
-    | "email_opened"
-    | "email_replied"
-    | "email_bounced"
-    | "meeting_scheduled"
-    | "meeting_notes"
-    | "stage_change"
-    | "human_handoff"
-    | "note"
-    | "approval"
-    | "ai_action"
-    | "other";
+  ts: string;
   title: string;
   preview?: string | null;
-  who?: string | null; // agent handle or person name
-  href?: string | null;
+  icon: LucideIcon;
+  iconClass: string;
+  who?: string | null;
 };
 
 export function CommunicationHistory({
@@ -51,202 +48,254 @@ export function CommunicationHistory({
   events = [],
   meetings = [],
   meetingNotes = [],
+  proposalApprovals = [],
 }: {
   emails?: Email[];
   events?: AppEvent[];
   meetings?: Meeting[];
   meetingNotes?: MeetingNote[];
+  proposalApprovals?: Approval[];
 }) {
-  const items: Item[] = [];
+  const outreach: Item[] = [];
+  const meetingItems: Item[] = [];
+  const proposalItems: Item[] = [];
+  const stageItems: Item[] = [];
 
-  // Emails — split per signal so the timeline reads chronologically
+  // ── Outreach ────────────────────────────────────────────────────────────
   for (const e of emails) {
     const subj = e.subject ?? "(no subject)";
     const stepLabel = e.step_number != null ? ` · step ${e.step_number}` : "";
 
     if (e.direction === "outbound") {
       const sentTs = e.sent_at ?? e.created_at;
-      items.push({
-        ts: sentTs,
-        type: e.status === "bounced" ? "email_bounced" : "email_outbound",
-        title:
-          e.status === "pending"
-            ? `Outbound queued${stepLabel}`
-            : e.status === "bounced"
-            ? `Outbound bounced${stepLabel}`
-            : `Outbound sent${stepLabel}`,
-        preview: subj,
-        who: "outreach-01",
-      });
+      const sender = "Outreach-01";
+      let title: string;
+      let icon: LucideIcon = ArrowRightCircle;
+      let iconClass = "bg-emerald-100 text-emerald-700";
+      switch (e.status) {
+        case "pending":
+          title = `${sender} queued an email${stepLabel}`;
+          break;
+        case "bounced":
+          title = `Email bounced${stepLabel}`;
+          icon = MessageCircle;
+          iconClass = "bg-rose-100 text-rose-700";
+          break;
+        case "failed":
+          title = `Send failed${stepLabel}`;
+          icon = MessageCircle;
+          iconClass = "bg-rose-100 text-rose-700";
+          break;
+        default:
+          title = `${sender} sent an email${stepLabel}`;
+      }
+      outreach.push({ ts: sentTs, title, preview: subj, icon, iconClass, who: sender });
       if (e.opened_at) {
-        items.push({
+        outreach.push({
           ts: e.opened_at,
-          type: "email_opened",
-          title: `Lead opened the email${stepLabel}`,
+          title: `Lead opened the message${stepLabel}`,
           preview: subj,
+          icon: Eye,
+          iconClass: "bg-amber-100 text-amber-700",
         });
       }
       if (e.replied_at || e.reply_body) {
-        items.push({
+        outreach.push({
           ts: e.replied_at ?? sentTs,
-          type: "email_replied",
           title: `Lead replied${stepLabel}`,
           preview: e.reply_body ?? subj,
+          icon: ArrowLeftCircle,
+          iconClass: "bg-blue-100 text-blue-700",
+          who: "Lead",
         });
       }
     } else {
-      // inbound row recorded directly (e.g. raw inbound email)
-      items.push({
+      // inbound row recorded directly (raw inbound email)
+      outreach.push({
         ts: e.replied_at ?? e.created_at,
-        type: "email_inbound",
-        title: subj,
-        preview: e.body ?? e.reply_body ?? null,
+        title: "Lead sent an inbound email",
+        preview: e.body ?? e.reply_body ?? subj,
+        icon: ArrowLeftCircle,
+        iconClass: "bg-blue-100 text-blue-700",
+        who: "Lead",
       });
     }
   }
 
-  // Meeting bookings
+  // ── Meetings ────────────────────────────────────────────────────────────
   for (const m of meetings) {
-    items.push({
+    meetingItems.push({
       ts: m.scheduled_at ?? m.created_at,
-      type: "meeting_scheduled",
-      title: `Meeting ${m.status}`,
-      preview: m.notes ?? `${m.format} meeting · ${m.duration_minutes} min`,
-      who: "scheduler-01",
+      title: `Meeting ${m.status === "scheduled" ? "booked" : m.status}`,
+      preview: m.notes ?? `${m.format} · ${m.duration_minutes} min`,
+      icon: CalendarDays,
+      iconClass: "bg-purple-100 text-purple-700",
+      who: "Sales-01",
     });
   }
-
-  // Captured post-meeting notes
   for (const n of meetingNotes) {
-    items.push({
+    meetingItems.push({
       ts: n.created_at,
-      type: "meeting_notes",
-      title: `Meeting outcome: ${n.outcome.replace("_", " ")}`,
-      preview: n.next_steps ?? n.notes ?? n.objections ?? null,
-      who: "human-rep",
+      title: `Meeting outcome: ${prettyOutcome(n.outcome)}`,
+      preview:
+        n.next_steps ?? n.notes ?? n.objections ?? "(no notes captured)",
+      icon: ClipboardList,
+      iconClass: "bg-emerald-100 text-emerald-700",
+      who: "HOS",
     });
   }
 
-  // Events — pick the ones worth showing in the feed
+  // ── Proposals ───────────────────────────────────────────────────────────
+  for (const a of proposalApprovals) {
+    const payload = (a.payload ?? {}) as Partial<ProposalReviewPayload>;
+    const status =
+      a.status === "approved"
+        ? "sent"
+        : a.status === "rejected"
+        ? "rejected"
+        : "pending HOS review";
+    proposalItems.push({
+      ts: a.created_at,
+      title: `Sales-01 drafted a proposal — ${status}`,
+      preview: payload.drafted_subject ?? "(subject pending)",
+      icon: Send,
+      iconClass: "bg-emerald-100 text-emerald-700",
+      who: "Sales-01",
+    });
+  }
+
+  // ── Stage changes ───────────────────────────────────────────────────────
   for (const e of events) {
     const payload = (e.payload ?? {}) as Record<string, unknown>;
-    const kind = typeof payload.kind === "string" ? payload.kind : null;
+    const kind = stringValue(payload.kind);
 
     if (e.event_type === "stage_changed") {
-      const before = stringValue(payload.before);
-      const after = stringValue(payload.after) ?? stringValue(payload.next_stage_id);
-      const stageName = stringValue(payload.stage_name) ?? stringValue(payload.completed_stage_name);
-      items.push({
-        ts: e.created_at,
-        type: "stage_change",
-        title:
-          stageName
-            ? `Stage moved → ${stageName}`
-            : after
-            ? `Stage moved${before ? ` from ${before}` : ""} → ${after}`
-            : "Stage moved",
-        preview: stringValue(payload.message) ?? null,
-        who: stringValue(payload.next_stage_agent) ?? "system",
-      });
-      continue;
-    }
+      const stageName =
+        stringValue(payload.stage_name) ??
+        stringValue(payload.completed_stage_name);
+      const after =
+        stageName ??
+        stringValue(payload.next_stage_id) ??
+        stringValue(payload.after) ??
+        "next stage";
+      const before = stringValue(payload.before) ?? null;
+      const movedBy = stringValue(payload.next_stage_agent) ?? stringValue(payload.agent) ?? "system";
+      const moverLabel = labelForAgent(movedBy);
 
-    if (e.event_type === "note_added") {
-      items.push({
+      let title: string;
+      if (kind === "human_stage_completed") {
+        title = `HOS marked "${stringValue(payload.completed_stage_name) ?? "the stage"}" complete — advanced to ${after}`;
+      } else if (kind === "process_stage_moved") {
+        title = `${moverLabel} moved this lead to ${after}`;
+      } else if (kind === "unsubscribed_via_button") {
+        title = "Lead marked unsubscribed";
+      } else if (kind === "manual_stage_update") {
+        title = `Lead stage updated → ${after}`;
+      } else {
+        title = `Moved to ${after}${before ? ` (was ${before})` : ""}`;
+      }
+
+      stageItems.push({
         ts: e.created_at,
-        type: "note",
-        title: "Internal note",
-        preview: stringValue(payload.note) ?? null,
-        who: stringValue(payload.user_name) ?? "hos",
+        title,
+        preview: stringValue(payload.message) ?? null,
+        icon: Workflow,
+        iconClass: "bg-indigo-100 text-indigo-700",
+        who: moverLabel,
       });
       continue;
     }
 
     if (e.event_type === "ai_action" && kind === "human_handoff_required") {
-      items.push({
+      stageItems.push({
         ts: e.created_at,
-        type: "human_handoff",
-        title: `Handoff to human: ${stringValue(payload.stage_name) ?? "stage"}`,
+        title: `Handed off to a human at "${stringValue(payload.stage_name) ?? "stage"}"`,
         preview: stringValue(payload.message) ?? null,
+        icon: Workflow,
+        iconClass: "bg-amber-100 text-amber-800",
         who: "system",
       });
       continue;
     }
 
-    if (e.event_type === "ai_action" && (kind === "lead_approved_inline" || kind === "lead_rejected_inline" || kind === "lead_list_auto_finalised")) {
-      items.push({
+    if (e.event_type === "note_added") {
+      stageItems.push({
         ts: e.created_at,
-        type: "approval",
-        title:
-          kind === "lead_approved_inline"
-            ? "Lead approved"
-            : kind === "lead_rejected_inline"
-            ? "Lead rejected"
-            : "Lead-list auto-finalised",
-        preview: null,
-        who: "hos",
-      });
-      continue;
-    }
-
-    if (e.event_type === "email_sent" || e.event_type === "email_opened" || e.event_type === "email_replied" || e.event_type === "email_bounced") {
-      // Already covered by emails[] above
-      continue;
-    }
-
-    if (e.event_type === "ai_action") {
-      items.push({
-        ts: e.created_at,
-        type: "ai_action",
-        title: `Agent action: ${kind ?? e.event_type}`,
-        preview: stringValue(payload.message) ?? null,
-        who: typeof payload.agent === "string" ? payload.agent : null,
+        title: "HOS added an internal note",
+        preview: stringValue(payload.note) ?? null,
+        icon: FileText,
+        iconClass: "bg-yellow-100 text-yellow-800",
+        who: "HOS",
       });
     }
   }
 
-  // Sort newest → oldest
-  items.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+  // Sort each group oldest → newest so the deal reads as a story
+  outreach.sort(byOldestFirst);
+  meetingItems.sort(byOldestFirst);
+  proposalItems.sort(byOldestFirst);
+  stageItems.sort(byOldestFirst);
+
+  const totalCount =
+    outreach.length + meetingItems.length + proposalItems.length + stageItems.length;
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Communication history ({items.length})</CardTitle>
+        <CardTitle className="text-base">Communication history ({totalCount})</CardTitle>
       </CardHeader>
-      <CardContent>
-        {items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Nothing yet — the feed populates as agents act.</p>
-        ) : (
-          <ul className="space-y-3">
-            {items.map((it, i) => {
-              const { Icon, klass } = visualFor(it.type);
-              return (
-                <li key={i} className="flex gap-3">
-                  <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${klass}`}>
-                    <Icon className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-baseline justify-between gap-2">
-                      <p className="text-sm font-medium">{it.title}</p>
-                      <span className="shrink-0 text-xs text-muted-foreground">{formatDateTime(it.ts)}</span>
-                    </div>
-                    {it.preview && (
-                      <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{it.preview}</p>
-                    )}
-                    {it.who && (
-                      <Badge variant="muted" className="mt-1 text-[10px]">
-                        {it.who}
-                      </Badge>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+      <CardContent className="space-y-6">
+        <Section title="Outreach" empty="No emails yet." items={outreach} />
+        <Section title="Meetings" empty="No meetings or meeting notes yet." items={meetingItems} />
+        <Section title="Proposals" empty="No drafted proposals yet." items={proposalItems} />
+        <Section title="Stage changes" empty="Stage changes will appear here as the lead moves through the pipeline." items={stageItems} />
       </CardContent>
     </Card>
   );
+}
+
+function Section({ title, items, empty }: { title: string; items: Item[]; empty: string }) {
+  return (
+    <div>
+      <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+        {title}
+      </p>
+      {items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{empty}</p>
+      ) : (
+        <ul className="space-y-3">
+          {items.map((it, i) => {
+            const Icon = it.icon;
+            return (
+              <li key={i} className="flex gap-3">
+                <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${it.iconClass}`}>
+                  <Icon className="h-3.5 w-3.5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <p className="text-sm font-medium">{it.title}</p>
+                    <span className="shrink-0 text-xs text-muted-foreground">{formatDateTime(it.ts)}</span>
+                  </div>
+                  {it.preview && (
+                    <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{it.preview}</p>
+                  )}
+                  {it.who && (
+                    <Badge variant="muted" className="mt-1 text-[10px]">
+                      {it.who}
+                    </Badge>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function byOldestFirst(a: Item, b: Item): number {
+  return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0;
 }
 
 function stringValue(v: unknown): string | null {
@@ -255,32 +304,17 @@ function stringValue(v: unknown): string | null {
   return null;
 }
 
-function visualFor(t: Item["type"]): { Icon: LucideIcon; klass: string } {
-  switch (t) {
-    case "email_outbound":
-      return { Icon: ArrowRightCircle, klass: "bg-emerald-100 text-emerald-700" };
-    case "email_inbound":
-    case "email_replied":
-      return { Icon: ArrowLeftCircle, klass: "bg-blue-100 text-blue-700" };
-    case "email_opened":
-      return { Icon: Eye, klass: "bg-amber-100 text-amber-700" };
-    case "email_bounced":
-      return { Icon: MessageCircle, klass: "bg-rose-100 text-rose-700" };
-    case "meeting_scheduled":
-      return { Icon: CalendarDays, klass: "bg-purple-100 text-purple-700" };
-    case "meeting_notes":
-      return { Icon: ClipboardList, klass: "bg-emerald-100 text-emerald-700" };
-    case "stage_change":
-      return { Icon: Workflow, klass: "bg-indigo-100 text-indigo-700" };
-    case "human_handoff":
-      return { Icon: Workflow, klass: "bg-amber-100 text-amber-800" };
-    case "note":
-      return { Icon: StickyNote, klass: "bg-yellow-100 text-yellow-800" };
-    case "approval":
-      return { Icon: CheckCircle2, klass: "bg-emerald-100 text-emerald-700" };
-    case "ai_action":
-      return { Icon: FileText, klass: "bg-slate-100 text-slate-700" };
+function prettyOutcome(o: string): string {
+  switch (o) {
+    case "positive":
+      return "positive — strong interest";
+    case "neutral":
+      return "neutral — needs more info";
+    case "negative":
+      return "negative — not a fit";
+    case "no_show":
+      return "no show";
     default:
-      return { Icon: FileText, klass: "bg-muted text-muted-foreground" };
+      return o;
   }
 }

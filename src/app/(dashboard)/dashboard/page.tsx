@@ -5,7 +5,7 @@ import { formatDateTime, formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Upload, Send, Hand } from "lucide-react";
-import { SalesFunnel, type StageCount } from "./sales-funnel";
+import { SalesFunnel, type FunnelLead, type StageCount } from "./sales-funnel";
 import type { SalesProcessStage } from "@/lib/supabase/types";
 import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
 
@@ -95,6 +95,7 @@ export default async function DashboardPage({
 
   let funnelStages: SalesProcessStage[] = [];
   let funnelCounts: StageCount[] = [];
+  let funnelLeadsByStage: Record<string, FunnelLead[]> = {};
   if (selectedClientId) {
     const { data: pbRow } = await supabase
       .from("playbooks")
@@ -107,19 +108,35 @@ export default async function DashboardPage({
     if (funnelStages.length > 0) {
       const { data: clientLeads } = await supabase
         .from("leads")
-        .select("stage, process_stage_id")
+        .select("id, company_name, contact_name, stage, process_stage_id, updated_at")
         .eq("client_id", selectedClientId);
-      const aggregate = new Map<string, number>();
-      for (const l of (clientLeads ?? []) as Array<{ stage: string; process_stage_id: string | null }>) {
+
+      const byStage = new Map<string, FunnelLead[]>();
+      for (const l of (clientLeads ?? []) as Array<{
+        id: string;
+        company_name: string;
+        contact_name: string | null;
+        stage: string;
+        process_stage_id: string | null;
+        updated_at: string;
+      }>) {
         const stageId = l.process_stage_id ?? inferProcessStageFromLeadStage(l.stage, funnelStages);
         if (!stageId) continue;
-        aggregate.set(stageId, (aggregate.get(stageId) ?? 0) + 1);
+        const arr = byStage.get(stageId) ?? [];
+        arr.push({
+          id: l.id,
+          company_name: l.company_name,
+          contact_name: l.contact_name,
+          updated_at: l.updated_at,
+        });
+        byStage.set(stageId, arr);
       }
       funnelCounts = funnelStages.map((s) => ({
         stageId: s.id,
         name: s.name,
-        count: aggregate.get(s.id) ?? 0,
+        count: (byStage.get(s.id) ?? []).length,
       }));
+      funnelLeadsByStage = Object.fromEntries(byStage);
     }
   }
 
@@ -186,6 +203,7 @@ export default async function DashboardPage({
           selectedClientId={selectedClientId}
           stages={funnelStages}
           counts={funnelCounts}
+          leadsByStage={funnelLeadsByStage}
         />
       </div>
 
