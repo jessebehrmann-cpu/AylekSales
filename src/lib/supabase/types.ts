@@ -86,6 +86,15 @@ export type Database = {
         Update: Partial<Approval>;
         Relationships: [];
       };
+      meeting_notes: {
+        Row: MeetingNote;
+        Insert: Partial<Omit<MeetingNote, "lead_id" | "outcome">> & {
+          lead_id: string;
+          outcome: MeetingOutcome;
+        };
+        Update: Partial<MeetingNote>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;
@@ -274,7 +283,48 @@ export type AppQuery = {
 // ── Playbooks ──────────────────────────────────────────────────────────────
 
 export type PlaybookStatus = "draft" | "pending_approval" | "approved";
-export type ApprovalType = "lead_list" | "strategy_change";
+export type ApprovalType = "lead_list" | "strategy_change" | "human_stage_task" | "proposal_review";
+
+export type MeetingOutcome = "positive" | "neutral" | "negative" | "no_show";
+
+export type MeetingNote = {
+  id: string;
+  lead_id: string;
+  client_id: string | null;
+  outcome: MeetingOutcome;
+  notes: string | null;
+  transcript: string | null;
+  objections: string | null;
+  next_steps: string | null;
+  drafted_proposal_subject: string | null;
+  drafted_proposal_body: string | null;
+  related_approval_id: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
+/**
+ * Payload shape for type='human_stage_task' approvals — one is created
+ * each time a lead enters a human-owned sales-process stage.
+ */
+export type HumanStageTaskPayload = {
+  stage_id: string;
+  stage_name: string;
+  agent: string;
+  message: string;
+};
+
+/**
+ * Payload shape for type='proposal_review' approvals — created after a
+ * Have-Meeting completion when Claude has drafted a follow-up proposal.
+ */
+export type ProposalReviewPayload = {
+  meeting_note_id: string;
+  drafted_subject: string;
+  drafted_body: string;
+  outcome: MeetingOutcome;
+  ai_warning?: string | null;
+};
 export type ApprovalStatus = "pending" | "approved" | "rejected";
 
 export type ICP = {

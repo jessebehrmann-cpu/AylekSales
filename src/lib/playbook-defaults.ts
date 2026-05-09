@@ -15,6 +15,14 @@ export const AGENT_OPTIONS: Array<{ value: string; label: string; human: boolean
 
 export const KNOWN_AGENTS = AGENT_OPTIONS.map((a) => a.value);
 
+/**
+ * Stage id for the special-cased Have Meeting stage. The Mark Complete
+ * button on that stage opens a post-meeting form modal (PostMeetingModal)
+ * instead of advancing immediately — see submitMeetingNotes() in
+ * src/app/(dashboard)/leads/actions.ts.
+ */
+export const HAVE_MEETING_STAGE_ID = "have_meeting";
+
 export function isHumanStage(agent: string | undefined): boolean {
   return (agent ?? "").trim().toLowerCase() === "human";
 }

@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/empty-state";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
 import { ApprovalBadge } from "@/components/approval-badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { Users, Upload, Plus } from "lucide-react";
@@ -15,17 +14,6 @@ import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
 import type { LeadApprovalStatus, LeadStage, SalesProcessStage } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
-
-const stageVariants: Record<string, "default" | "success" | "warning" | "destructive" | "muted"> = {
-  new: "muted",
-  contacted: "default",
-  replied: "warning",
-  meeting_booked: "warning",
-  quoted: "warning",
-  won: "success",
-  lost: "destructive",
-  unsubscribed: "muted",
-};
 
 type LeadRow = {
   id: string;
@@ -77,7 +65,8 @@ export default async function LeadsPage({
     query = query.in("id", approvalLeadIds);
   }
   if (searchParams.client) query = query.eq("client_id", searchParams.client);
-  if (searchParams.stage) query = query.eq("stage", searchParams.stage as never);
+  // Map a sales-process stage filter to leads.process_stage_id.
+  if (searchParams.stage) query = query.eq("process_stage_id", searchParams.stage);
   if (searchParams.q) {
     const q = searchParams.q.replace(/[%]/g, "");
     query = query.or(`company_name.ilike.%${q}%,contact_name.ilike.%${q}%,email.ilike.%${q}%`);
@@ -108,6 +97,20 @@ export default async function LeadsPage({
   const activeFilter = searchParams.client && clients?.find((c) => c.id === searchParams.client)?.name;
   const showApprovalColumn = !!searchParams.approval;
 
+  // Distinct sales-process stages across the loaded clients — used to
+  // populate the filter dropdown. Order is preserved from the first client
+  // that defines them; later clients merge in any extra stage ids.
+  const processStageOptions: Array<{ id: string; name: string }> = [];
+  const seenStageIds = new Set<string>();
+  for (const stages of stagesByClient.values()) {
+    for (const s of stages) {
+      if (!seenStageIds.has(s.id)) {
+        seenStageIds.add(s.id);
+        processStageOptions.push({ id: s.id, name: s.name });
+      }
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -128,6 +131,9 @@ export default async function LeadsPage({
         }
       />
 
+      {/* Distinct sales-process stages across the loaded clients (used to
+          populate the process-stage filter). */}
+      {(() => null)()}
       <form className="mb-4 flex flex-wrap items-center gap-2" action="/leads">
         <input
           type="text"
@@ -144,14 +150,20 @@ export default async function LeadsPage({
           <option value="">All clients</option>
           {clients?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-        <select
-          name="stage"
-          defaultValue={searchParams.stage ?? ""}
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-        >
-          <option value="">All stages</option>
-          {Object.keys(stageVariants).map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
+        {processStageOptions.length > 0 && (
+          <select
+            name="stage"
+            defaultValue={searchParams.stage ?? ""}
+            className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+          >
+            <option value="">All process stages</option>
+            {processStageOptions.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        )}
         <Button type="submit" size="sm" variant="outline">Apply</Button>
         {(searchParams.client || searchParams.stage || searchParams.q || searchParams.approval) && (
           <Button asChild type="button" size="sm" variant="ghost"><Link href="/leads">Clear</Link></Button>
@@ -177,7 +189,6 @@ export default async function LeadsPage({
                   <TableHead>Title</TableHead>
                   <TableHead>Process stage</TableHead>
                   <TableHead>{showApprovalColumn ? "Decide" : "Approval"}</TableHead>
-                  <TableHead>Stage</TableHead>
                   <TableHead>Last contact</TableHead>
                   <TableHead className="text-right">Value</TableHead>
                 </TableRow>
@@ -197,7 +208,6 @@ export default async function LeadsPage({
                       <TableCell>{l.title ?? "—"}</TableCell>
                       <TableCell>
                         <ProcessStageCell
-                          leadId={l.id}
                           leadStage={l.stage}
                           currentStageId={inferredStageId}
                           stages={stages}
@@ -214,9 +224,6 @@ export default async function LeadsPage({
                         ) : (
                           <ApprovalBadge status={l.approval_status} />
                         )}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={stageVariants[l.stage] ?? "muted"}>{l.stage}</Badge>
                       </TableCell>
                       <TableCell>{formatDate(l.last_contacted_at)}</TableCell>
                       <TableCell className="text-right">{formatCurrency(l.contract_value)}</TableCell>

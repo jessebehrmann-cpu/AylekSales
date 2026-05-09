@@ -114,15 +114,26 @@ export function DeleteLeadButton({ leadId }: { leadId: string }) {
 
 export function MarkStageCompleteButton({
   leadId,
+  stageId,
   stageName,
+  onOpenMeetingModal,
 }: {
   leadId: string;
+  stageId: string;
   stageName: string;
+  /** When set + the stage is have_meeting, the click opens the modal
+   *  instead of calling markHumanStageComplete directly. */
+  onOpenMeetingModal?: () => void;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
 
   function onClick() {
+    // Have-Meeting stage requires the post-meeting form modal.
+    if (stageId === "have_meeting" && onOpenMeetingModal) {
+      onOpenMeetingModal();
+      return;
+    }
     if (
       !confirm(
         `Mark "${stageName}" as complete? The lead will advance to the next stage in the playbook.`,

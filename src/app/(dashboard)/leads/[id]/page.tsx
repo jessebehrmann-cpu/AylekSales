@@ -7,16 +7,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
-import {
-  DeleteLeadButton,
-  MarkStageCompleteButton,
-  NoteForm,
-  StagePicker,
-  UnsubscribeLeadButton,
-} from "./lead-actions";
-import { ApprovalBadge } from "@/components/approval-badge";
+import { NoteForm } from "./lead-actions";
+import { LeadDetailHeaderActions } from "./lead-detail-header";
 import { LeadTimelineCard } from "./lead-timeline";
-import type { Lead, Email, Meeting, AppEvent, SalesProcessStage } from "@/lib/supabase/types";
+import { CommunicationHistory } from "./communication-history";
+import type { Lead, Email, Meeting, AppEvent, MeetingNote, SalesProcessStage } from "@/lib/supabase/types";
 import { inferProcessStageFromLeadStage, isHumanStage } from "@/lib/playbook-defaults";
 
 export const dynamic = "force-dynamic";
@@ -27,17 +22,19 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
   await requireUser();
   const supabase = createClient();
 
-  const [leadRes, eventsRes, emailsRes, meetingsRes] = await Promise.all([
+  const [leadRes, eventsRes, emailsRes, meetingsRes, meetingNotesRes] = await Promise.all([
     supabase.from("leads").select("*, clients(name)").eq("id", params.id).maybeSingle(),
-    supabase.from("events").select("*").eq("lead_id", params.id).order("created_at", { ascending: false }).limit(50),
+    supabase.from("events").select("*").eq("lead_id", params.id).order("created_at", { ascending: false }).limit(200),
     supabase.from("emails").select("*").eq("lead_id", params.id).order("created_at", { ascending: false }),
     supabase.from("meetings").select("*").eq("lead_id", params.id).order("scheduled_at", { ascending: true }),
+    supabase.from("meeting_notes").select("*").eq("lead_id", params.id).order("created_at", { ascending: false }),
   ]);
 
   const lead = leadRes.data as unknown as LeadWithClient | null;
   const events = eventsRes.data as AppEvent[] | null;
   const emails = emailsRes.data as Email[] | null;
   const meetings = meetingsRes.data as Meeting[] | null;
+  const meetingNotes = meetingNotesRes.data as MeetingNote[] | null;
 
   if (!lead) notFound();
 
@@ -72,18 +69,13 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
             .join(" · ") || undefined
         }
         actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <ApprovalBadge status={lead.approval_status} />
-            <StagePicker leadId={lead.id} current={lead.stage} />
-            {onHumanStage && currentStage && (
-              <MarkStageCompleteButton leadId={lead.id} stageName={currentStage.name} />
-            )}
-            <UnsubscribeLeadButton
-              leadId={lead.id}
-              alreadyUnsubscribed={lead.stage === "unsubscribed"}
-            />
-            <DeleteLeadButton leadId={lead.id} />
-          </div>
+          <LeadDetailHeaderActions
+            leadId={lead.id}
+            approvalStatus={lead.approval_status}
+            leadStage={lead.stage}
+            currentStage={currentStage}
+            onHumanStage={onHumanStage}
+          />
         }
       />
 
@@ -96,7 +88,6 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
 
       {processStages.length > 0 && (
         <LeadTimelineCard
-          leadId={lead.id}
           stages={processStages}
           currentStageId={inferredStageId}
           leadStage={lead.stage}
@@ -106,76 +97,12 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Email history ({emails?.length ?? 0})</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {!emails || emails.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No emails yet.</p>
-              ) : (
-                emails.map((e) => (
-                  <div key={e.id} className="rounded border p-3 text-sm">
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span className="flex flex-wrap items-center gap-1.5">
-                        <span className="font-medium text-foreground">
-                          {e.direction === "inbound" ? "← inbound" : "→ outbound"}
-                        </span>
-                        {e.step_number != null && (
-                          <span className="rounded-full border bg-muted px-1.5 py-0.5 text-[10px]">
-                            step {e.step_number}
-                          </span>
-                        )}
-                        <EmailStatusPill email={e} />
-                      </span>
-                      <span>
-                        {e.sent_at
-                          ? `Sent ${formatDateTime(e.sent_at)}`
-                          : `Queued ${formatDateTime(e.created_at)}`}
-                      </span>
-                    </div>
-                    <p className="mt-1 font-medium">{e.subject ?? "(no subject)"}</p>
-                    {e.body && (
-                      <p className="mt-2 whitespace-pre-line text-muted-foreground">{e.body}</p>
-                    )}
-                    <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
-                      {e.opened_at && <span>👁  Opened {formatDateTime(e.opened_at)}</span>}
-                      {e.replied_at && <span>↩  Replied {formatDateTime(e.replied_at)}</span>}
-                    </div>
-                    {e.reply_body && (
-                      <div className="mt-2 rounded bg-muted px-2 py-1.5">
-                        <p className="text-xs uppercase text-muted-foreground">Reply:</p>
-                        <p className="whitespace-pre-line">{e.reply_body}</p>
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader><CardTitle className="text-base">Activity ({events?.length ?? 0})</CardTitle></CardHeader>
-            <CardContent>
-              {!events || events.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No events yet.</p>
-              ) : (
-                <ul className="divide-y">
-                  {events.map((e) => (
-                    <li key={e.id} className="flex items-start justify-between gap-4 py-2 text-sm">
-                      <div>
-                        <span className="font-medium">{e.event_type}</span>
-                        {e.payload && Object.keys(e.payload as object).length > 0 && (
-                          <p className="text-xs text-muted-foreground">{summarisePayload(e.payload as Record<string, unknown>)}</p>
-                        )}
-                      </div>
-                      <span className="shrink-0 text-xs text-muted-foreground">{formatDateTime(e.created_at)}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
+          <CommunicationHistory
+            emails={emails ?? []}
+            events={events ?? []}
+            meetings={meetings ?? []}
+            meetingNotes={meetingNotes ?? []}
+          />
 
           <Card>
             <CardHeader><CardTitle className="text-base">Add note</CardTitle></CardHeader>
@@ -243,42 +170,5 @@ function Row({ label, value }: { label: string; value: string | null | undefined
       <span className="text-muted-foreground">{label}</span>
       <span className="text-right">{value || "—"}</span>
     </div>
-  );
-}
-
-function summarisePayload(payload: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const [k, v] of Object.entries(payload)) {
-    if (typeof v === "string" || typeof v === "number") {
-      parts.push(`${k}: ${v}`);
-      if (parts.length >= 3) break;
-    }
-  }
-  return parts.join(" · ");
-}
-
-function EmailStatusPill({ email }: { email: Email }) {
-  const variant: { label: string; klass: string } = (() => {
-    switch (email.status) {
-      case "pending":
-        return { label: "queued", klass: "bg-muted text-muted-foreground" };
-      case "sent":
-        return { label: "sent", klass: "bg-emerald-100 text-emerald-800" };
-      case "opened":
-        return { label: "opened", klass: "bg-amber-100 text-amber-800" };
-      case "replied":
-        return { label: "replied", klass: "bg-emerald-200 text-emerald-900" };
-      case "bounced":
-        return { label: "bounced", klass: "bg-rose-100 text-rose-800" };
-      case "failed":
-        return { label: "failed", klass: "bg-rose-100 text-rose-800" };
-      default:
-        return { label: String(email.status), klass: "bg-muted text-muted-foreground" };
-    }
-  })();
-  return (
-    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${variant.klass}`}>
-      {variant.label}
-    </span>
   );
 }
