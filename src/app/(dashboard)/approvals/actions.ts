@@ -290,11 +290,23 @@ async function applyLeadListApproval(
 
   // Flip every lead in this batch from pending_approval → approved.
   // Done after enrolment so a partial-failure mid-update doesn't leave stale
-  // pending leads with no campaign attached.
-  await supabase
+  // pending leads with no campaign attached. Capture (and log) errors here
+  // explicitly — earlier silent swallow let stale pending leads accumulate.
+  const { error: leadUpdErr } = await supabase
     .from("leads")
     .update({ approval_status: "approved" })
     .in("id", payload.lead_ids);
+  if (leadUpdErr) {
+    console.error("[approvals] failed to bulk-update lead approval_status", {
+      approval_id: approval.id,
+      lead_ids: payload.lead_ids,
+      error: leadUpdErr,
+    });
+    return {
+      ok: false,
+      error: `Could not flip leads to approved: ${leadUpdErr.message}`,
+    };
+  }
 
   // Activate the campaign if it isn't already (DB hard gate enforces approved playbook).
   if (campaign.status !== "active") {
