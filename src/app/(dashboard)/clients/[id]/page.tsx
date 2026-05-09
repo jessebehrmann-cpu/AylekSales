@@ -87,7 +87,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           <div>
             <CardTitle className="text-base">Prospect-01</CardTitle>
             <p className="mt-1 text-xs text-muted-foreground">
-              Sources contacts via Lusha against this client&apos;s approved playbook ICP. New leads land in the approval queue.
+              Sources contacts via Apollo against this client&apos;s approved playbook ICP. New leads land in the approval queue.
             </p>
           </div>
           <RunProspectButton clientId={client.id} />

@@ -1,22 +1,22 @@
 /**
- * Prospect-01 — sources fresh contacts via Lusha based on the client's
+ * Prospect-01 — sources fresh contacts via Apollo.io based on the client's
  * approved playbook ICP, dedupes against existing leads, writes new leads
  * with source='ai_enriched' + approval_status='pending_approval', and creates
  * a lead_list approval row for the HOS to review.
  *
- * Re-run safe: rate-limited by Lusha + dedup, so calling twice in a row
+ * Re-run safe: rate-limited by Apollo + dedup, so calling twice in a row
  * just inserts whatever's new since last time.
  */
 
 import { createServiceClient } from "@/lib/supabase/server";
 import { logEvent } from "@/lib/events";
 import {
-  LushaApiError,
-  LushaConfigError,
-  searchLushaContacts,
-  type LushaContact,
-  type LushaSearchFilter,
-} from "@/lib/lusha";
+  ApolloApiError,
+  ApolloConfigError,
+  searchApolloContacts,
+  type ApolloContact,
+  type ApolloSearchFilter,
+} from "@/lib/apollo";
 import type { ICP, Playbook } from "@/lib/supabase/types";
 
 export type ProspectRunResult = {
@@ -33,7 +33,7 @@ export type ProspectRunFailure = {
   ok: false;
   error: string;
   /** True when the failure is a missing/invalid API key, so callers can
-   *  surface a clearer "configure Lusha" message vs a runtime error. */
+   *  surface a clearer "configure Apollo" message vs a runtime error. */
   config_error?: boolean;
 };
 
@@ -59,28 +59,28 @@ export async function runProspect01(
   const playbook = pb as Playbook;
   const icp = (playbook.icp ?? {}) as ICP;
 
-  // 2. Build Lusha filter
+  // 2. Build Apollo filter
   const filter = buildFilter(icp, opts.pageSize ?? 50);
-  if (!filter.industries?.length && !filter.jobTitles?.length) {
+  if (!filter.industries?.length && !filter.titles?.length) {
     return {
       ok: false,
       error: "ICP needs at least one of: industries, target_titles. Tighten the playbook and retry.",
     };
   }
 
-  // 3. Call Lusha
-  let contacts: LushaContact[];
+  // 3. Call Apollo
+  let contacts: ApolloContact[];
   try {
-    const result = await searchLushaContacts(filter);
+    const result = await searchApolloContacts(filter);
     contacts = result.contacts;
   } catch (err) {
-    if (err instanceof LushaConfigError) {
+    if (err instanceof ApolloConfigError) {
       return { ok: false, error: err.message, config_error: true };
     }
-    if (err instanceof LushaApiError) {
+    if (err instanceof ApolloApiError) {
       return {
         ok: false,
-        error: `Lusha API error (${err.status}): ${err.message}${err.body ? ` — ${err.body.slice(0, 200)}` : ""}`,
+        error: `Apollo API error (${err.status}): ${err.message}${err.body ? ` — ${err.body.slice(0, 200)}` : ""}`,
       };
     }
     return {
@@ -120,7 +120,7 @@ export async function runProspect01(
       company_name: c.company.name ?? "Unknown company",
       contact_name:
         [c.first_name, c.last_name].filter(Boolean).join(" ") || null,
-      title: c.job_title,
+      title: c.title,
       email: c.email,
       industry: c.company.industry,
       website: c.company.website ?? c.company.domain,
@@ -165,15 +165,13 @@ export async function runProspect01(
         type: "lead_list",
         status: "pending",
         title: `Prospect-01 sourced ${insertedLeadIds.length} new leads`,
-        summary: `Sourced via Lusha against the approved ICP. ${duplicates} duplicate(s) filtered.${campaign ? ` Will enrol into ${campaign.name} on approve.` : " No campaign attached — pick one at approval time."}`,
+        summary: `Sourced via Apollo against the approved ICP. ${duplicates} duplicate(s) filtered.${campaign ? ` Will enrol into ${campaign.name} on approve.` : " No campaign attached — pick one at approval time."}`,
         payload: {
           lead_ids: insertedLeadIds,
           source: "prospect-01",
           campaign_id: campaign?.id ?? null,
-          lusha: {
+          apollo: {
             filter,
-            duplicates,
-            credits_used: undefined,
           },
         },
         related_campaign_id: campaign?.id ?? null,
@@ -212,10 +210,10 @@ export async function runProspect01(
   };
 }
 
-function buildFilter(icp: ICP, pageSize: number): LushaSearchFilter {
+function buildFilter(icp: ICP, pageSize: number): ApolloSearchFilter {
   return {
     industries: icp.industries?.length ? icp.industries : undefined,
-    jobTitles: icp.target_titles?.length ? icp.target_titles : undefined,
+    titles: icp.target_titles?.length ? icp.target_titles : undefined,
     locations: icp.geography?.length ? icp.geography : undefined,
     companySize: parseCompanySize(icp.company_size),
     pageSize,

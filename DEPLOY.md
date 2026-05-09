@@ -63,8 +63,8 @@ After deploy, point the Stripe webhook at
 
 | Variable | Where to get it | Notes |
 |----------|-----------------|-------|
-| `LUSHA_API_KEY` | https://www.lusha.com/ → Settings → API | Without this, the Run Prospect-01 button surfaces a clear "configure Lusha" error. |
-| `LUSHA_BASE_URL` | optional | Defaults to `https://api.lusha.com` — only set if you're on a custom Lusha plan with a different base URL. |
+| `APOLLO_API_KEY` | https://app.apollo.io/ → Settings → Integrations → API | Without this, the Run Prospect-01 button surfaces a clear "configure Apollo" error. **Free plan: 50 exports/month. Basic plan: 10,000/month.** |
+| `APOLLO_BASE_URL` | optional | Defaults to `https://api.apollo.io` — only override if you're using a regional or sandbox endpoint. |
 
 ### Required for crons + agent triggers
 
@@ -110,5 +110,5 @@ emails go out within seconds rather than waiting for the next tick.
 3. Add a client at `/clients/new`
 4. Build a playbook + submit for approval at `/playbooks`
 5. Once the playbook is live, click **Run Prospect-01** on the client detail
-   page to source your first leads (requires `LUSHA_API_KEY`).
+   page to source your first leads (requires `APOLLO_API_KEY`).
 6. Approve the lead_list in `/approvals` and watch the first emails go out.
