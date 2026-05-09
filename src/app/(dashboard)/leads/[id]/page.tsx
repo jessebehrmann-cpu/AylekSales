@@ -4,13 +4,20 @@ import { createClient } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
-import { DeleteLeadButton, NoteForm, StagePicker, UnsubscribeLeadButton } from "./lead-actions";
+import {
+  DeleteLeadButton,
+  MarkStageCompleteButton,
+  NoteForm,
+  StagePicker,
+  UnsubscribeLeadButton,
+} from "./lead-actions";
 import { ApprovalBadge } from "@/components/approval-badge";
 import { LeadTimelineCard } from "./lead-timeline";
 import type { Lead, Email, Meeting, AppEvent, SalesProcessStage } from "@/lib/supabase/types";
-import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
+import { inferProcessStageFromLeadStage, isHumanStage } from "@/lib/playbook-defaults";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +57,10 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
   }
   const inferredStageId =
     lead.process_stage_id ?? inferProcessStageFromLeadStage(lead.stage, processStages);
+  const currentStage = inferredStageId
+    ? processStages.find((s) => s.id === inferredStageId) ?? null
+    : null;
+  const onHumanStage = currentStage ? isHumanStage(currentStage.agent) : false;
 
   return (
     <>
@@ -64,6 +75,9 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
           <div className="flex flex-wrap items-center gap-2">
             <ApprovalBadge status={lead.approval_status} />
             <StagePicker leadId={lead.id} current={lead.stage} />
+            {onHumanStage && currentStage && (
+              <MarkStageCompleteButton leadId={lead.id} stageName={currentStage.name} />
+            )}
             <UnsubscribeLeadButton
               leadId={lead.id}
               alreadyUnsubscribed={lead.stage === "unsubscribed"}
@@ -72,6 +86,13 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
           </div>
         }
       />
+
+      {onHumanStage && currentStage && (
+        <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-900">
+          <strong>Automation paused:</strong> {currentStage.name} is owned by a human in
+          the loop. Pending outreach for this lead is on hold until you mark the stage complete.
+        </Alert>
+      )}
 
       {processStages.length > 0 && (
         <LeadTimelineCard

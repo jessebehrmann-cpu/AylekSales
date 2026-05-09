@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { resend, FROM_EMAIL } from "@/lib/resend";
 import { logEvent } from "@/lib/events";
-import type { SequenceStep } from "@/lib/supabase/types";
+import type { SalesProcessStage, SequenceStep } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -37,7 +37,7 @@ export async function GET(req: NextRequest) {
   // Pull a batch — keep it conservative so a single hourly run doesn't blow timeouts.
   const { data: pending, error } = await supabase
     .from("emails")
-    .select("*, leads(id, email, stage, company_name, contact_name, last_contacted_at, client_id), campaigns(id, name, sequence_steps, status)")
+    .select("*, leads(id, email, stage, company_name, contact_name, last_contacted_at, client_id, process_stage_id), campaigns(id, name, sequence_steps, status)")
     .eq("status", "pending")
     .lte("send_at", nowIso)
     .order("send_at", { ascending: true })
@@ -48,6 +48,31 @@ export async function GET(req: NextRequest) {
   }
   if (!pending || pending.length === 0) {
     return NextResponse.json({ ok: true, processed: 0, sent: 0, skipped: 0 });
+  }
+
+  // Pre-fetch sales_process for every distinct client_id in the batch so we
+  // can gate sends on human-owned stages without per-row playbook lookups.
+  const distinctClientIds = Array.from(
+    new Set(
+      (pending as PendingEmail[])
+        .map((r) => r.client_id)
+        .filter((id): id is string => !!id),
+    ),
+  );
+  const humanStagesByClient = new Map<string, Set<string>>();
+  if (distinctClientIds.length > 0) {
+    const { data: pbs } = await supabase
+      .from("playbooks")
+      .select("client_id, sales_process")
+      .in("client_id", distinctClientIds)
+      .eq("status", "approved");
+    for (const row of (pbs ?? []) as Array<{ client_id: string; sales_process: SalesProcessStage[] | null }>) {
+      const set = new Set<string>();
+      for (const stage of row.sales_process ?? []) {
+        if ((stage.agent ?? "").trim().toLowerCase() === "human") set.add(stage.id);
+      }
+      humanStagesByClient.set(row.client_id, set);
+    }
   }
 
   let sent = 0;
@@ -66,6 +91,30 @@ export async function GET(req: NextRequest) {
 
     if (lead.stage === "unsubscribed" || lead.stage === "won" || lead.stage === "lost") {
       await cancelRemaining(row, "stage_blocked");
+      skipped++;
+      continue;
+    }
+
+    // Human-in-the-loop gate: if the lead's current process stage is
+    // owned by a human, automation pauses until HOS marks the stage
+    // complete on the lead detail page. Cancel just this row (don't kill
+    // future sequence steps — the next agent stage may want them later).
+    const humanStages = lead.client_id ? humanStagesByClient.get(lead.client_id) : null;
+    if (lead.process_stage_id && humanStages && humanStages.has(lead.process_stage_id)) {
+      await markFailed(row.id, "human_stage_gate");
+      await logEvent({
+        service: true,
+        event_type: "ai_action",
+        lead_id: lead.id,
+        client_id: row.client_id,
+        campaign_id: row.campaign_id,
+        payload: {
+          kind: "human_handoff_required",
+          lead_name: lead.company_name,
+          stage_id: lead.process_stage_id,
+          message: "Outreach paused: lead is at a human-owned stage. HOS to mark complete to advance.",
+        },
+      });
       skipped++;
       continue;
     }
@@ -210,6 +259,7 @@ type PendingEmail = {
     contact_name: string | null;
     last_contacted_at: string | null;
     client_id: string | null;
+    process_stage_id: string | null;
   } | null;
   campaigns: {
     id: string;

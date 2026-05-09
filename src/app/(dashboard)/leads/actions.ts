@@ -193,6 +193,91 @@ export async function deleteLeadAndRedirect(leadId: string): Promise<void> {
 }
 
 /**
+ * HOS marks the current human-owned process stage complete. The lead
+ * advances to the next stage in the playbook's sales_process. If the next
+ * stage is also human, automation stays paused (HOS will mark that one too).
+ * If the next stage is owned by an agent, automation may resume on the next
+ * cron tick.
+ *
+ * Refuses to act if the lead's current stage isn't owned by a human (so
+ * accidental clicks on a non-human stage are no-ops).
+ */
+export async function markHumanStageComplete(leadId: string): Promise<ActionResult<{ next_stage_id: string | null; next_is_human: boolean }>> {
+  try {
+    const user = await requireUser();
+    const supabase = createClient();
+
+    const { data: lead } = await supabase
+      .from("leads")
+      .select("client_id, process_stage_id, stage, company_name")
+      .eq("id", leadId)
+      .maybeSingle();
+    if (!lead) return { ok: false, error: "Lead not found" };
+    if (!lead.client_id) return { ok: false, error: "Lead has no client" };
+
+    const { data: pb } = await supabase
+      .from("playbooks")
+      .select("sales_process")
+      .eq("client_id", lead.client_id)
+      .eq("status", "approved")
+      .maybeSingle();
+    const stages = ((pb as { sales_process?: SalesProcessStage[] } | null)?.sales_process ?? []) as SalesProcessStage[];
+    if (stages.length === 0) {
+      return { ok: false, error: "Client has no approved playbook with sales_process stages" };
+    }
+
+    const currentIdx = lead.process_stage_id
+      ? stages.findIndex((s) => s.id === lead.process_stage_id)
+      : -1;
+    if (currentIdx === -1) {
+      return { ok: false, error: "Lead is not on a sales-process stage" };
+    }
+    const currentStage = stages[currentIdx];
+    if (!isHumanStage(currentStage.agent)) {
+      return { ok: false, error: `Current stage "${currentStage.name}" is not human-owned — nothing to mark complete.` };
+    }
+
+    const nextStage = stages[currentIdx + 1] ?? null;
+    const nextStageId = nextStage?.id ?? null;
+    const nextIsHuman = nextStage ? isHumanStage(nextStage.agent) : false;
+
+    // Advance lead to next stage (or stay put if this was the last one)
+    if (nextStageId) {
+      const { error } = await supabase
+        .from("leads")
+        .update({ process_stage_id: nextStageId })
+        .eq("id", leadId);
+      if (error) return { ok: false, error: error.message };
+    }
+
+    await logEvent({
+      event_type: "stage_changed",
+      lead_id: leadId,
+      client_id: lead.client_id,
+      user_id: user.auth.id,
+      payload: {
+        kind: "human_stage_completed",
+        lead_name: lead.company_name,
+        completed_stage_id: currentStage.id,
+        completed_stage_name: currentStage.name,
+        next_stage_id: nextStageId,
+        next_stage_agent: nextStage?.agent ?? null,
+        message: nextStage
+          ? `${currentStage.name} marked complete. Advanced to ${nextStage.name}${nextIsHuman ? " (also human)" : ` (handed to ${nextStage.agent})`}.`
+          : `${currentStage.name} marked complete. End of pipeline.`,
+      },
+    });
+
+    revalidatePath(`/leads/${leadId}`);
+    revalidatePath("/leads");
+    revalidatePath("/dashboard");
+    return { ok: true, next_stage_id: nextStageId, next_is_human: nextIsHuman };
+  } catch (err) {
+    return actionError(err);
+  }
+}
+
+/**
  * Halt all outreach for a lead. Flips stage='unsubscribed', cancels every
  * pending email scheduled for them, logs the change. Used by the
  * Unsubscribe button on the lead detail page.
@@ -303,6 +388,15 @@ export async function moveLeadToProcessStage(
     });
 
     if (stage && isHumanStage(stage.agent)) {
+      // Pause outreach: cancel all pending emails for this lead while
+      // they sit in a human-owned stage. They get re-queued (if at all)
+      // when the lead advances back into an agent-owned stage.
+      await supabase
+        .from("emails")
+        .update({ status: "failed" })
+        .eq("lead_id", leadId)
+        .eq("status", "pending");
+
       await logEvent({
         event_type: "ai_action",
         lead_id: leadId,
@@ -313,7 +407,7 @@ export async function moveLeadToProcessStage(
           lead_name: lead.company_name,
           stage_name: stage.name,
           stage_id: stage.id,
-          message: `Lead reached "${stage.name}" — automation paused, awaiting human action.`,
+          message: `Lead reached "${stage.name}" — automation paused, awaiting human action. HOS to mark complete to advance.`,
         },
       });
     }

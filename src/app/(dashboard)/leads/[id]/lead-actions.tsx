@@ -6,9 +6,15 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert } from "@/components/ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { addLeadNote, deleteLeadAndRedirect, unsubscribeLead, updateLeadStage } from "../actions";
+import {
+  addLeadNote,
+  deleteLeadAndRedirect,
+  markHumanStageComplete,
+  unsubscribeLead,
+  updateLeadStage,
+} from "../actions";
 import type { LeadStage } from "@/lib/supabase/types";
-import { Trash2, Ban } from "lucide-react";
+import { Trash2, Ban, CheckCircle2 } from "lucide-react";
 
 const STAGES: LeadStage[] = [
   "new",
@@ -102,6 +108,46 @@ export function DeleteLeadButton({ leadId }: { leadId: string }) {
   return (
     <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={onClick} disabled={pending}>
       <Trash2 className="mr-1.5 h-4 w-4" /> Delete
+    </Button>
+  );
+}
+
+export function MarkStageCompleteButton({
+  leadId,
+  stageName,
+}: {
+  leadId: string;
+  stageName: string;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+
+  function onClick() {
+    if (
+      !confirm(
+        `Mark "${stageName}" as complete? The lead will advance to the next stage in the playbook.`,
+      )
+    )
+      return;
+    start(async () => {
+      const r = await markHumanStageComplete(leadId);
+      if (!r.ok) {
+        alert(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  return (
+    <Button
+      size="sm"
+      onClick={onClick}
+      disabled={pending}
+      className="bg-emerald-600 text-white hover:bg-emerald-700"
+    >
+      <CheckCircle2 className="mr-1.5 h-4 w-4" />
+      {pending ? "Advancing…" : `Mark "${stageName}" complete`}
     </Button>
   );
 }
