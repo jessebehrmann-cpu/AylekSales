@@ -26,9 +26,27 @@ const stageVariants: Record<string, "default" | "success" | "warning" | "destruc
 export default async function LeadsPage({
   searchParams,
 }: {
-  searchParams: { client?: string; stage?: string; q?: string };
+  searchParams: { client?: string; stage?: string; q?: string; approval?: string };
 }) {
   const supabase = createClient();
+
+  // If filtered by approval id, resolve the lead_ids first.
+  let approvalLeadIds: string[] | null = null;
+  let approvalDescription: string | null = null;
+  if (searchParams.approval) {
+    const { data: appr } = await supabase
+      .from("approvals")
+      .select("title, payload")
+      .eq("id", searchParams.approval)
+      .maybeSingle();
+    if (appr) {
+      const payload = (appr as { payload: { lead_ids?: string[] } | null }).payload;
+      approvalLeadIds = payload?.lead_ids ?? [];
+      approvalDescription = `Filtered to approval batch — ${(appr as { title: string }).title}`;
+    } else {
+      approvalLeadIds = []; // unknown id → empty result
+    }
+  }
 
   let query = supabase
     .from("leads")
@@ -36,6 +54,9 @@ export default async function LeadsPage({
     .order("created_at", { ascending: false })
     .limit(200);
 
+  if (approvalLeadIds !== null) {
+    query = query.in("id", approvalLeadIds);
+  }
   if (searchParams.client) query = query.eq("client_id", searchParams.client);
   if (searchParams.stage) query = query.eq("stage", searchParams.stage as never);
   if (searchParams.q) {
@@ -54,7 +75,10 @@ export default async function LeadsPage({
     <>
       <PageHeader
         title="Leads"
-        description={activeFilter ? `Filtered to ${activeFilter}` : "All leads across every client."}
+        description={
+          approvalDescription ??
+          (activeFilter ? `Filtered to ${activeFilter}` : "All leads across every client.")
+        }
         actions={
           <>
             <Button asChild variant="outline" size="sm">
@@ -92,7 +116,7 @@ export default async function LeadsPage({
           {Object.keys(stageVariants).map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
         <Button type="submit" size="sm" variant="outline">Apply</Button>
-        {(searchParams.client || searchParams.stage || searchParams.q) && (
+        {(searchParams.client || searchParams.stage || searchParams.q || searchParams.approval) && (
           <Button asChild type="button" size="sm" variant="ghost"><Link href="/leads">Clear</Link></Button>
         )}
       </form>

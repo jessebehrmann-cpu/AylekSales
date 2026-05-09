@@ -8,16 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/empty-state";
 import { BookOpen } from "lucide-react";
 import { formatDateTime } from "@/lib/utils";
+import { ProposeChangesButton } from "./propose-changes-button";
 import { EnsureDraftPlaybookButton } from "./ensure-draft-button";
-import type { Playbook, PlaybookStatus } from "@/lib/supabase/types";
+import type { Playbook } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
-
-const statusVariant: Record<PlaybookStatus, "muted" | "warning" | "success"> = {
-  draft: "muted",
-  pending_approval: "warning",
-  approved: "success",
-};
 
 export default async function PlaybooksPage() {
   await requireUser();
@@ -41,7 +36,7 @@ export default async function PlaybooksPage() {
     <>
       <PageHeader
         title="Playbooks"
-        description="Per-client strategy: ICP, email sequence, escalation rules. Approved playbook is required before any campaign launches."
+        description="One live playbook per client gates every campaign. Branch a draft when you want to propose changes."
       />
 
       {(!clients || clients.length === 0) && (
@@ -61,40 +56,84 @@ export default async function PlaybooksPage() {
         <div className="space-y-3">
           {clients.map((c) => {
             const pbs = list.filter((p) => p.client_id === c.id);
-            const approved = pbs.find((p) => p.status === "approved");
-            const pending = pbs.find((p) => p.status === "pending_approval");
-            const draft = pbs.find((p) => p.status === "draft");
+            const live = pbs.find((p) => p.status === "approved");
+            const drafts = pbs.filter((p) => p.status === "draft");
+            const pending = pbs.filter((p) => p.status === "pending_approval");
+
+            const headlineHref = live
+              ? `/playbooks/${live.id}`
+              : drafts[0]
+              ? `/playbooks/${drafts[0].id}`
+              : null;
 
             return (
-              <Card key={c.id}>
-                <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-6">
-                  <div>
-                    <p className="font-medium">{c.name}</p>
-                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-                      {approved ? (
-                        <Badge variant="success">v{approved.version} approved</Badge>
+              <Card key={c.id} className="overflow-hidden">
+                <CardContent className="flex flex-wrap items-start justify-between gap-3 pt-6">
+                  <div className="min-w-0 flex-1">
+                    {headlineHref ? (
+                      <Link
+                        href={headlineHref}
+                        className="text-base font-semibold hover:underline"
+                      >
+                        {c.name}
+                      </Link>
+                    ) : (
+                      <p className="text-base font-semibold">{c.name}</p>
+                    )}
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                      {live ? (
+                        <Badge variant="success">v{live.version} · Live</Badge>
                       ) : (
-                        <Badge variant="muted">no approved playbook</Badge>
+                        <Badge variant="muted">No live playbook</Badge>
                       )}
-                      {pending && (
-                        <Badge variant="warning">v{pending.version} pending</Badge>
+                      {pending.length > 0 && (
+                        <Badge variant="warning">
+                          v{pending[0].version} · Pending approval
+                        </Badge>
                       )}
-                      {draft && draft.id !== approved?.id && draft.id !== pending?.id && (
-                        <Badge variant="muted">v{draft.version} draft</Badge>
+                      {drafts.length > 0 && (
+                        <Badge variant="muted">
+                          {drafts.length} draft{drafts.length === 1 ? "" : "s"}
+                        </Badge>
+                      )}
+                      {live && (
+                        <span className="text-muted-foreground">
+                          updated {formatDateTime(live.updated_at)}
+                        </span>
                       )}
                     </div>
                   </div>
+
                   <div className="flex flex-wrap gap-2">
-                    {pbs.map((p) => (
-                      <Button asChild key={p.id} variant="outline" size="sm">
-                        <Link href={`/playbooks/${p.id}`}>
-                          v{p.version} · {p.status.replace("_", " ")}
-                        </Link>
-                      </Button>
-                    ))}
-                    {!draft && <EnsureDraftPlaybookButton clientId={c.id} />}
+                    {live && <ProposeChangesButton clientId={c.id} />}
+                    {!live && drafts.length === 0 && (
+                      <EnsureDraftPlaybookButton clientId={c.id} />
+                    )}
                   </div>
                 </CardContent>
+
+                {/* version row — quick links to all versions */}
+                {pbs.length > 0 && (
+                  <div className="border-t bg-muted/40 px-6 py-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      {pbs.map((p) => (
+                        <Link
+                          key={p.id}
+                          href={`/playbooks/${p.id}`}
+                          className={
+                            p.status === "approved"
+                              ? "rounded-md border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
+                              : p.status === "pending_approval"
+                              ? "rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900 hover:bg-amber-100"
+                              : "rounded-md border bg-background px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted"
+                          }
+                        >
+                          v{p.version} · {p.status === "approved" ? "Live" : p.status === "pending_approval" ? "Pending" : "Draft"}
+                        </Link>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </Card>
             );
           })}

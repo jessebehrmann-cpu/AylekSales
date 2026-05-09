@@ -288,6 +288,14 @@ async function applyLeadListApproval(
   const { error: emailErr } = await supabase.from("emails").insert(emailRows);
   if (emailErr) return { ok: false, error: emailErr.message };
 
+  // Flip every lead in this batch from pending_approval → approved.
+  // Done after enrolment so a partial-failure mid-update doesn't leave stale
+  // pending leads with no campaign attached.
+  await supabase
+    .from("leads")
+    .update({ approval_status: "approved" })
+    .in("id", payload.lead_ids);
+
   // Activate the campaign if it isn't already (DB hard gate enforces approved playbook).
   if (campaign.status !== "active") {
     const { error: campErr } = await supabase

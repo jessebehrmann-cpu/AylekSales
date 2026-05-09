@@ -8,7 +8,9 @@ import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { DeleteLeadButton, NoteForm, StagePicker } from "./lead-actions";
 import { ApprovalBadge } from "@/components/approval-badge";
-import type { Lead, Email, Meeting, AppEvent } from "@/lib/supabase/types";
+import { LeadTimelineCard } from "./lead-timeline";
+import type { Lead, Email, Meeting, AppEvent, SalesProcessStage } from "@/lib/supabase/types";
+import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +36,21 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
 
   const clientName = lead.clients?.name;
 
+  // Pull the client's approved playbook so we can render the sales-process
+  // timeline at the top of the page.
+  let processStages: SalesProcessStage[] = [];
+  if (lead.client_id) {
+    const { data: pbRow } = await supabase
+      .from("playbooks")
+      .select("sales_process")
+      .eq("client_id", lead.client_id)
+      .eq("status", "approved")
+      .maybeSingle();
+    processStages = ((pbRow as { sales_process?: SalesProcessStage[] } | null)?.sales_process ?? []) as SalesProcessStage[];
+  }
+  const inferredStageId =
+    lead.process_stage_id ?? inferProcessStageFromLeadStage(lead.stage, processStages);
+
   return (
     <>
       <PageHeader
@@ -51,6 +68,16 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
           </div>
         }
       />
+
+      {processStages.length > 0 && (
+        <LeadTimelineCard
+          leadId={lead.id}
+          stages={processStages}
+          currentStageId={inferredStageId}
+          leadStage={lead.stage}
+          isExplicit={lead.process_stage_id != null}
+        />
+      )}
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">

@@ -176,6 +176,8 @@ export type Lead = {
   source: "import" | "manual" | "inbound" | "ai_enriched";
   stage: LeadStage;
   approval_status: LeadApprovalStatus;
+  /** Pointer at the current SalesProcessStage.id from the lead's playbook. */
+  process_stage_id: string | null;
   contract_value: number | null;
   assigned_to: string | null;
   last_contacted_at: string | null;

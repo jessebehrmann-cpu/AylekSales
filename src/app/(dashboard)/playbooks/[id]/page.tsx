@@ -14,25 +14,35 @@ export default async function PlaybookDetailPage({
   await requireUser();
   const supabase = createClient();
 
-  const [{ data: pbRow }, { data: versionsRows }] = await Promise.all([
-    supabase
-      .from("playbooks")
-      .select("*, clients(name)")
-      .eq("id", params.id)
-      .maybeSingle(),
+  const { data: pbRow } = await supabase
+    .from("playbooks")
+    .select("*, clients(name)")
+    .eq("id", params.id)
+    .maybeSingle();
+
+  const playbook = pbRow as unknown as (Playbook & { clients: { name: string } | null }) | null;
+  if (!playbook) notFound();
+
+  const [{ data: versionsRows }, { data: siblingRows }] = await Promise.all([
     supabase
       .from("playbook_versions")
       .select("id, version, status, created_at, change_reason")
       .eq("playbook_id", params.id)
       .order("version", { ascending: false })
       .limit(20),
+    supabase
+      .from("playbooks")
+      .select("id, version, status, updated_at")
+      .eq("client_id", playbook.client_id)
+      .order("version", { ascending: false }),
   ]);
 
-  const playbook = pbRow as unknown as (Playbook & { clients: { name: string } | null }) | null;
-  if (!playbook) notFound();
   const versions = (versionsRows ?? []) as Array<
     Pick<PlaybookVersion, "id" | "version" | "status" | "created_at" | "change_reason">
   >;
+  const siblings = (siblingRows ?? []) as Array<
+    Pick<Playbook, "id" | "version" | "status" | "updated_at">
+  >;
 
-  return <PlaybookEditor playbook={playbook} versions={versions} />;
+  return <PlaybookEditor playbook={playbook} versions={versions} siblings={siblings} />;
 }

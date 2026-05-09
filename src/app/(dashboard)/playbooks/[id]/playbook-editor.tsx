@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert } from "@/components/ui/alert";
+import { cn } from "@/lib/utils";
 import {
   ArrowDown,
   ArrowUp,
@@ -25,10 +26,14 @@ import {
   ListTree,
 } from "lucide-react";
 import {
+  clonePlaybookFromLive,
   regenerateSequenceForPlaybook,
   saveDraftPlaybook,
+  setPlaybookLive,
   submitPlaybookForApproval,
 } from "../actions";
+import Link from "next/link";
+import { GitBranch, Radio } from "lucide-react";
 import type {
   ChannelFlags,
   EscalationRule,
@@ -43,10 +48,12 @@ import type {
   TeamMember,
   VoiceTone,
 } from "@/lib/supabase/types";
-import { DEFAULT_SALES_PROCESS, KNOWN_AGENTS } from "@/lib/playbook-defaults";
+import { AGENT_OPTIONS, DEFAULT_SALES_PROCESS, isHumanStage } from "@/lib/playbook-defaults";
+import { SalesProcessTimeline } from "@/components/sales-process-timeline";
 
 type EditorPlaybook = Playbook & { clients: { name: string } | null };
 type VersionRow = Pick<PlaybookVersion, "id" | "version" | "status" | "created_at" | "change_reason">;
+type SiblingRow = Pick<Playbook, "id" | "version" | "status" | "updated_at">;
 
 type TabKey =
   | "sales_process"
@@ -95,9 +102,11 @@ const DARK = {
 export function PlaybookEditor({
   playbook,
   versions,
+  siblings = [],
 }: {
   playbook: EditorPlaybook;
   versions: VersionRow[];
+  siblings?: SiblingRow[];
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -256,14 +265,17 @@ export function PlaybookEditor({
       <div className={`flex flex-wrap items-center justify-between gap-3 border-b ${DARK.panelBorder} px-6 py-4`}>
         <div className="flex items-baseline gap-3">
           <p className={`text-xs uppercase tracking-wider ${DARK.faint}`}>
-            {playbook.clients?.name ?? "Client"} · Playbook
+            <Link href="/playbooks" className="hover:text-[#b0b0c8]">{playbook.clients?.name ?? "Client"}</Link> · Playbook
           </p>
           <h1 className="font-['Epilogue',sans-serif] text-2xl font-bold tracking-tight">
             v{playbook.version}
           </h1>
-          <StatusPill status={playbook.status} />
+          <BigStatusBadge status={playbook.status} />
         </div>
         <div className="flex items-center gap-2">
+          {playbook.status === "approved" && (
+            <ProposeChangesInline clientId={playbook.client_id} />
+          )}
           {!readOnly && (
             <>
               <Button
@@ -332,19 +344,31 @@ export function PlaybookEditor({
             })}
           </nav>
 
-          {versions.length > 0 && (
+          {(siblings.length > 0 || versions.length > 0) && (
             <div className="mt-8">
               <p className={`mb-2 text-[10px] font-semibold uppercase tracking-[0.15em] ${DARK.faint}`}>
-                <ListTree className="mr-1 inline h-3 w-3" /> Version history
+                <ListTree className="mr-1 inline h-3 w-3" /> All versions
               </p>
-              <ul className={`divide-y ${DARK.panelBorder} text-xs ${DARK.body}`}>
-                {versions.slice(0, 5).map((v) => (
-                  <li key={v.id} className="flex items-center justify-between py-1.5">
-                    <span>v{v.version}</span>
-                    <span className={DARK.faint}>{v.status}</span>
-                  </li>
+              <ul className={`space-y-1 text-xs ${DARK.body}`}>
+                {siblings.map((s) => (
+                  <SiblingRowItem key={s.id} sibling={s} active={s.id === playbook.id} />
                 ))}
               </ul>
+              {versions.length > 0 && (
+                <>
+                  <p className={`mb-2 mt-4 text-[10px] font-semibold uppercase tracking-[0.15em] ${DARK.faint}`}>
+                    Snapshot history
+                  </p>
+                  <ul className={`divide-y ${DARK.panelBorder} text-xs ${DARK.body}`}>
+                    {versions.slice(0, 5).map((v) => (
+                      <li key={v.id} className="flex items-center justify-between py-1.5">
+                        <span>v{v.version}</span>
+                        <span className={DARK.faint}>{v.status}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </div>
           )}
         </aside>
@@ -412,7 +436,7 @@ function SalesProcessSection({
   return (
     <SectionShell
       label="Sales Process"
-      blurb="Ordered list of stages that this client's sales process follows. Agents read this to know what stage they're operating in and what comes next."
+      blurb="Ordered timeline of stages this client's sales process follows. Each stage has an Owner — pick an agent to automate, or 'Human in the loop' to pause for HOS."
       right={
         !readOnly && (
           <div className="flex gap-2">
@@ -432,7 +456,7 @@ function SalesProcessSection({
               onClick={() =>
                 onChange([
                   ...stages,
-                  { id: cryptoId(), name: "", description: "", agent: "" },
+                  { id: cryptoId(), name: "", description: "", agent: "prospect-01" },
                 ])
               }
               className={`${DARK.input} ${DARK.body} hover:bg-[#1a1a28]`}
@@ -446,70 +470,78 @@ function SalesProcessSection({
       {stages.length === 0 ? (
         <EmptyPanel>No stages yet. Click &quot;Use default stages&quot; to start, or add your own.</EmptyPanel>
       ) : (
-        <div className="space-y-2">
-          {stages.map((s, idx) => (
-            <div key={s.id ?? idx} className={`flex items-start gap-3 rounded-xl border ${DARK.panelBorder} ${DARK.panel} p-4`}>
-              <div className="flex flex-col items-center gap-1 pt-1">
-                <div className={`flex h-7 w-7 items-center justify-center rounded-full border ${DARK.accentSoft} text-xs font-bold ${DARK.accent}`}>
-                  {idx + 1}
+        <>
+          {/* Timeline preview — same component the lead detail uses */}
+          <div className={`mb-5 rounded-xl border ${DARK.panelBorder} ${DARK.panel} px-4 py-3`}>
+            <SalesProcessTimeline stages={stages} compact />
+          </div>
+
+          <p className={`mb-2 text-[10px] font-semibold uppercase tracking-[0.15em] ${DARK.faint}`}>Edit stages</p>
+          <div className="space-y-2">
+            {stages.map((s, idx) => (
+              <div key={s.id ?? idx} className={`flex items-start gap-3 rounded-xl border ${DARK.panelBorder} ${DARK.panel} p-4`}>
+                <div className="flex flex-col items-center gap-1 pt-1">
+                  <div className={`flex h-7 w-7 items-center justify-center rounded-full border ${DARK.accentSoft} text-xs font-bold ${DARK.accent}`}>
+                    {idx + 1}
+                  </div>
+                  {!readOnly && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onChange(reorder(stages, idx, -1))}
+                        disabled={idx === 0}
+                        className={`${DARK.faint} hover:text-[#b0b0c8] disabled:opacity-30`}
+                      >
+                        <ArrowUp className="h-3 w-3" />
+                      </button>
+                      <GripVertical className="h-3 w-3 text-[#3a3a52]" />
+                      <button
+                        type="button"
+                        onClick={() => onChange(reorder(stages, idx, +1))}
+                        disabled={idx === stages.length - 1}
+                        className={`${DARK.faint} hover:text-[#b0b0c8] disabled:opacity-30`}
+                      >
+                        <ArrowDown className="h-3 w-3" />
+                      </button>
+                    </>
+                  )}
+                </div>
+                <div className="grid flex-1 gap-2 md:grid-cols-[1fr,1fr]">
+                  <Input
+                    value={s.name}
+                    readOnly={readOnly}
+                    onChange={(e) => onChange(stages.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
+                    placeholder="Stage name (e.g. Book meeting)"
+                    className={`${DARK.input} text-sm ${DARK.inputText} ${DARK.inputPlaceholder}`}
+                  />
+                  <OwnerSelector
+                    value={s.agent}
+                    readOnly={readOnly}
+                    onChange={(v) => onChange(stages.map((x, i) => (i === idx ? { ...x, agent: v } : x)))}
+                  />
+                  <Textarea
+                    value={s.description}
+                    readOnly={readOnly}
+                    rows={2}
+                    onChange={(e) => onChange(stages.map((x, i) => (i === idx ? { ...x, description: e.target.value } : x)))}
+                    placeholder="What happens at this stage"
+                    className={`${DARK.input} md:col-span-2 text-sm ${DARK.body} ${DARK.inputPlaceholder}`}
+                  />
                 </div>
                 {!readOnly && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => onChange(reorder(stages, idx, -1))}
-                      disabled={idx === 0}
-                      className={`${DARK.faint} hover:text-[#b0b0c8] disabled:opacity-30`}
-                    >
-                      <ArrowUp className="h-3 w-3" />
-                    </button>
-                    <GripVertical className="h-3 w-3 text-[#3a3a52]" />
-                    <button
-                      type="button"
-                      onClick={() => onChange(reorder(stages, idx, +1))}
-                      disabled={idx === stages.length - 1}
-                      className={`${DARK.faint} hover:text-[#b0b0c8] disabled:opacity-30`}
-                    >
-                      <ArrowDown className="h-3 w-3" />
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    onClick={() => onChange(stages.filter((_, i) => i !== idx))}
+                    className={`${DARK.faint} hover:text-red-400`}
+                    title="Remove stage"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
                 )}
               </div>
-              <div className="grid flex-1 gap-2 md:grid-cols-[1fr,1fr]">
-                <Input
-                  value={s.name}
-                  readOnly={readOnly}
-                  onChange={(e) => onChange(stages.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))}
-                  placeholder="Stage name (e.g. Book meeting)"
-                  className={`${DARK.input} text-sm ${DARK.inputText} ${DARK.inputPlaceholder}`}
-                />
-                <AgentInput
-                  value={s.agent}
-                  readOnly={readOnly}
-                  onChange={(v) => onChange(stages.map((x, i) => (i === idx ? { ...x, agent: v } : x)))}
-                />
-                <Textarea
-                  value={s.description}
-                  readOnly={readOnly}
-                  rows={2}
-                  onChange={(e) => onChange(stages.map((x, i) => (i === idx ? { ...x, description: e.target.value } : x)))}
-                  placeholder="What happens at this stage"
-                  className={`${DARK.input} md:col-span-2 text-sm ${DARK.body} ${DARK.inputPlaceholder}`}
-                />
-              </div>
-              {!readOnly && (
-                <button
-                  type="button"
-                  onClick={() => onChange(stages.filter((_, i) => i !== idx))}
-                  className={`${DARK.faint} hover:text-red-400`}
-                  title="Remove stage"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </>
       )}
     </SectionShell>
   );
@@ -1197,7 +1229,7 @@ function ObjectionField({
   );
 }
 
-function AgentInput({
+function OwnerSelector({
   value,
   onChange,
   readOnly,
@@ -1206,21 +1238,57 @@ function AgentInput({
   onChange: (v: string) => void;
   readOnly: boolean;
 }) {
+  const human = isHumanStage(value);
+  const valid = AGENT_OPTIONS.some((a) => a.value === value);
+  // If unset, default to first agent for tidier UX (operator can change)
+  const effective = valid ? value : "prospect-01";
+
+  function setMode(mode: "agent" | "human") {
+    if (mode === "human") onChange("human");
+    else if (human) onChange("prospect-01");
+  }
+
   return (
-    <div>
-      <Input
-        value={value}
-        readOnly={readOnly}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="Agent (e.g. outreach-01)"
-        list="known-agents"
-        className={`${DARK.input} text-sm ${DARK.inputText} ${DARK.inputPlaceholder}`}
-      />
-      <datalist id="known-agents">
-        {KNOWN_AGENTS.map((a) => (
-          <option key={a} value={a} />
-        ))}
-      </datalist>
+    <div className={`flex flex-col gap-2 rounded-md ${DARK.input} px-2.5 py-2`}>
+      <p className={`text-[10px] uppercase tracking-wider ${DARK.faint}`}>Owner</p>
+      <div className="flex gap-1">
+        <button
+          type="button"
+          disabled={readOnly}
+          onClick={() => setMode("agent")}
+          className={cn(
+            "rounded-md px-2 py-1 text-[11px] font-medium",
+            !human ? `${DARK.accentSofter} ${DARK.accent}` : `${DARK.faint} hover:bg-[#1a1a28]`,
+          )}
+        >
+          Agent
+        </button>
+        <button
+          type="button"
+          disabled={readOnly}
+          onClick={() => setMode("human")}
+          className={cn(
+            "rounded-md px-2 py-1 text-[11px] font-medium",
+            human ? "bg-amber-500/15 text-amber-300" : `${DARK.faint} hover:bg-[#1a1a28]`,
+          )}
+        >
+          Human in the loop
+        </button>
+      </div>
+      {!human && (
+        <select
+          value={effective}
+          disabled={readOnly}
+          onChange={(e) => onChange(e.target.value)}
+          className={`h-8 rounded ${DARK.input} px-2 text-xs ${DARK.inputText}`}
+        >
+          {AGENT_OPTIONS.filter((a) => !a.human).map((a) => (
+            <option key={a.value} value={a.value}>
+              {a.label}
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   );
 }
@@ -1243,6 +1311,117 @@ function StatusPill({ status }: { status: Playbook["status"] }) {
     <span className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-wider ${map[status]}`}>
       {status.replace("_", " ")}
     </span>
+  );
+}
+
+function BigStatusBadge({ status }: { status: Playbook["status"] }) {
+  if (status === "approved") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-[rgba(0,229,160,0.4)] bg-[rgba(0,229,160,0.12)] px-3 py-1 text-xs font-semibold uppercase tracking-wider text-[#00e5a0]">
+        <Radio className="h-3 w-3" /> Live
+      </span>
+    );
+  }
+  if (status === "pending_approval") {
+    return (
+      <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-amber-400">
+        Pending approval
+      </span>
+    );
+  }
+  return (
+    <span className="rounded-full border border-[#262636] bg-[#1a1a28] px-3 py-1 text-xs font-semibold uppercase tracking-wider text-[#b0b0c8]">
+      Draft · Not live
+    </span>
+  );
+}
+
+function ProposeChangesInline({ clientId }: { clientId: string | null }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  if (!clientId) return null;
+  function onClick() {
+    start(async () => {
+      const r = await clonePlaybookFromLive(clientId!);
+      if (!r.ok) {
+        alert(r.error);
+        return;
+      }
+      router.push(`/playbooks/${r.id}`);
+      router.refresh();
+    });
+  }
+  return (
+    <Button
+      size="sm"
+      onClick={onClick}
+      disabled={pending}
+      className={`${DARK.accentSofter} ${DARK.accent} hover:bg-[rgba(0,229,160,0.25)]`}
+    >
+      <GitBranch className="mr-1 h-3 w-3" />
+      {pending ? "Branching…" : "Propose changes"}
+    </Button>
+  );
+}
+
+function SiblingRowItem({ sibling, active }: { sibling: SiblingRow; active: boolean }) {
+  return (
+    <li
+      className={cn(
+        "flex items-center justify-between gap-2 rounded-md px-2 py-1.5",
+        active ? "bg-[#14141f] ring-1 ring-[#1e1e2e]" : "hover:bg-[#0e0e18]",
+      )}
+    >
+      {active ? (
+        <span className="font-medium">v{sibling.version}</span>
+      ) : (
+        <Link href={`/playbooks/${sibling.id}`} className="hover:underline">
+          v{sibling.version}
+        </Link>
+      )}
+      <SiblingStatus sibling={sibling} active={active} />
+    </li>
+  );
+}
+
+function SiblingStatus({ sibling, active }: { sibling: SiblingRow; active: boolean }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  if (sibling.status === "approved") {
+    return <span className={`text-[10px] font-semibold uppercase ${DARK.accent}`}>Live</span>;
+  }
+  if (sibling.status === "pending_approval") {
+    return <span className="text-[10px] font-semibold uppercase text-amber-300">Pending</span>;
+  }
+  function onSetLive() {
+    if (!confirm(`Set v${sibling.version} as the live playbook? Any current live version will be demoted to draft.`)) return;
+    start(async () => {
+      const r = await setPlaybookLive(sibling.id);
+      if (!r.ok) {
+        alert(r.error);
+        return;
+      }
+      // After making someone live, refresh; if we were viewing a different
+      // version, the badge here doesn't need to change because we navigated to
+      // /playbooks first via the rail click. Just refresh in place.
+      router.refresh();
+    });
+  }
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={`text-[10px] uppercase ${DARK.faint}`}>Draft</span>
+      {!active && (
+        <button
+          type="button"
+          onClick={onSetLive}
+          disabled={pending}
+          className={`text-[10px] font-semibold uppercase tracking-wider ${DARK.accent} hover:underline disabled:opacity-50`}
+          title="HOS-only: switch which version is live without going through approval"
+        >
+          {pending ? "…" : "Set live"}
+        </button>
+      )}
+    </div>
   );
 }
 

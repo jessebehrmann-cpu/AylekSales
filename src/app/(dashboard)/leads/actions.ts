@@ -7,7 +7,8 @@ import { createClient } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth";
 import { logEvent } from "@/lib/events";
 import { actionError, type ActionResult } from "@/lib/actions";
-import type { LeadStage } from "@/lib/supabase/types";
+import type { LeadStage, Playbook, SalesProcessStage } from "@/lib/supabase/types";
+import { isHumanStage } from "@/lib/playbook-defaults";
 
 const STAGES = [
   "new",
@@ -189,4 +190,84 @@ export async function deleteLead(leadId: string): Promise<ActionResult> {
 export async function deleteLeadAndRedirect(leadId: string): Promise<void> {
   await deleteLead(leadId);
   redirect("/leads");
+}
+
+/**
+ * Manually move a lead to a sales-process stage (clicking a node on the
+ * timeline). If the destination stage is owned by a human agent, also log a
+ * `human_handoff_required` event so HOS sees the task on the dashboard.
+ */
+export async function moveLeadToProcessStage(
+  leadId: string,
+  stageId: string,
+): Promise<ActionResult> {
+  try {
+    const user = await requireUser();
+    const supabase = createClient();
+
+    const { data: lead } = await supabase
+      .from("leads")
+      .select("client_id, process_stage_id, company_name, contact_name")
+      .eq("id", leadId)
+      .maybeSingle();
+    if (!lead) return { ok: false, error: "Lead not found" };
+
+    // Look up the stage definition from the client's approved playbook
+    let stage: SalesProcessStage | null = null;
+    if (lead.client_id) {
+      const { data: pb } = await supabase
+        .from("playbooks")
+        .select("sales_process")
+        .eq("client_id", lead.client_id)
+        .eq("status", "approved")
+        .maybeSingle();
+      const stages = (pb as { sales_process?: SalesProcessStage[] } | null)?.sales_process ?? [];
+      stage = stages.find((s) => s.id === stageId) ?? null;
+    }
+
+    const before = lead.process_stage_id;
+    const { error } = await supabase
+      .from("leads")
+      .update({ process_stage_id: stageId })
+      .eq("id", leadId);
+    if (error) return { ok: false, error: error.message };
+
+    await logEvent({
+      event_type: "stage_changed",
+      lead_id: leadId,
+      client_id: lead.client_id,
+      user_id: user.auth.id,
+      payload: {
+        kind: "process_stage_moved",
+        lead_name: lead.company_name,
+        before,
+        after: stageId,
+        stage_name: stage?.name ?? stageId,
+        agent: stage?.agent ?? null,
+      },
+    });
+
+    if (stage && isHumanStage(stage.agent)) {
+      await logEvent({
+        event_type: "ai_action",
+        lead_id: leadId,
+        client_id: lead.client_id,
+        user_id: user.auth.id,
+        payload: {
+          kind: "human_handoff_required",
+          lead_name: lead.company_name,
+          stage_name: stage.name,
+          stage_id: stage.id,
+          message: `Lead reached "${stage.name}" — automation paused, awaiting human action.`,
+        },
+      });
+    }
+
+    revalidatePath(`/leads/${leadId}`);
+    revalidatePath("/leads");
+    revalidatePath("/dashboard");
+    return { ok: true };
+  } catch (err) {
+    return actionError(err);
+  }
 }

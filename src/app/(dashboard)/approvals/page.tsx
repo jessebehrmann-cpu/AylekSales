@@ -4,7 +4,7 @@ import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { ApprovalCard } from "./approval-card";
 import { Hand } from "lucide-react";
-import type { Approval } from "@/lib/supabase/types";
+import type { Approval, LeadListPayload } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +41,25 @@ export default async function ApprovalsPage({
 
   const approvals = (rows ?? []) as unknown as ApprovalRow[];
   const allCampaigns = (campaignsRes.data ?? []) as Array<{ id: string; name: string; status: string; client_id: string | null }>;
+
+  // Pre-fetch lead summaries referenced by any lead_list approval so the card
+  // can render names as deep links instead of "4 leads in this batch".
+  const leadIds = Array.from(
+    new Set(
+      approvals
+        .filter((a) => a.type === "lead_list")
+        .flatMap((a) => (a.payload as LeadListPayload | null)?.lead_ids ?? []),
+    ),
+  );
+  let leadSummaries: Array<{ id: string; company_name: string; contact_name: string | null }> = [];
+  if (leadIds.length > 0) {
+    const { data: leadRows } = await supabase
+      .from("leads")
+      .select("id, company_name, contact_name")
+      .in("id", leadIds);
+    leadSummaries = (leadRows ?? []) as typeof leadSummaries;
+  }
+  const leadById = new Map(leadSummaries.map((l) => [l.id, l]));
 
   const tabs: Array<{ key: Approval["status"]; label: string; count: number }> = [
     { key: "pending", label: "Pending", count: pendingCountRes.count ?? 0 },
@@ -90,13 +109,23 @@ export default async function ApprovalsPage({
         />
       ) : (
         <div className="space-y-3">
-          {approvals.map((a) => (
-            <ApprovalCard
-              key={a.id}
-              approval={a}
-              clientCampaigns={allCampaigns.filter((c) => c.client_id === a.client_id)}
-            />
-          ))}
+          {approvals.map((a) => {
+            const ids =
+              a.type === "lead_list"
+                ? (a.payload as LeadListPayload | null)?.lead_ids ?? []
+                : [];
+            const leads = ids
+              .map((id) => leadById.get(id))
+              .filter((l): l is { id: string; company_name: string; contact_name: string | null } => !!l);
+            return (
+              <ApprovalCard
+                key={a.id}
+                approval={a}
+                clientCampaigns={allCampaigns.filter((c) => c.client_id === a.client_id)}
+                batchLeads={leads}
+              />
+            );
+          })}
         </div>
       )}
     </>

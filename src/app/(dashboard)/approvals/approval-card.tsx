@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -15,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Check, X, Search, RefreshCw, Plus } from "lucide-react";
+import { Check, X, Search, RefreshCw, Plus, ExternalLink } from "lucide-react";
 import { approveApproval, rejectApproval } from "./actions";
 import type {
   Approval,
@@ -26,15 +27,18 @@ import { formatDateTime } from "@/lib/utils";
 
 type ApprovalRow = Approval & { clients: { name: string } | null };
 type CampaignOption = { id: string; name: string; status: string; client_id: string | null };
+type BatchLead = { id: string; company_name: string; contact_name: string | null };
 
 const NEW_CAMPAIGN_VALUE = "__new__";
 
 export function ApprovalCard({
   approval,
   clientCampaigns = [],
+  batchLeads = [],
 }: {
   approval: ApprovalRow;
   clientCampaigns?: CampaignOption[];
+  batchLeads?: BatchLead[];
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -142,7 +146,7 @@ export function ApprovalCard({
           </p>
         )}
 
-        <PayloadDetail approval={approval} />
+        <PayloadDetail approval={approval} batchLeads={batchLeads} />
 
         {/* Campaign picker — only for lead_list approvals without a campaign_id baked in */}
         {isPending && needsCampaignChoice && (
@@ -230,15 +234,48 @@ function statusVariant(status: Approval["status"]) {
   }
 }
 
-function PayloadDetail({ approval }: { approval: Approval }) {
+function PayloadDetail({
+  approval,
+  batchLeads,
+}: {
+  approval: Approval;
+  batchLeads: BatchLead[];
+}) {
   if (approval.type === "lead_list") {
     const p = approval.payload as LeadListPayload;
+    const total = p.lead_ids?.length ?? 0;
+    const preview = batchLeads.slice(0, 6);
+    const remaining = total - preview.length;
     return (
-      <div className="space-y-1 text-xs text-muted-foreground">
+      <div className="space-y-2 text-xs text-muted-foreground">
         <p>
-          <span className="font-medium text-foreground">{p.lead_ids?.length ?? 0}</span> leads in this batch
+          <span className="font-medium text-foreground">{total}</span> lead{total === 1 ? "" : "s"} in this batch
           {p.source && ` · sourced from ${p.source}`}
         </p>
+        {preview.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {preview.map((l) => (
+              <Link
+                key={l.id}
+                href={`/leads/${l.id}`}
+                className="rounded-md border border-border bg-background px-2 py-0.5 text-xs font-medium text-foreground hover:bg-muted"
+              >
+                {l.company_name}
+              </Link>
+            ))}
+            {remaining > 0 && (
+              <span className="rounded-md border border-dashed border-border px-2 py-0.5 text-xs">
+                + {remaining} more
+              </span>
+            )}
+          </div>
+        )}
+        <Link
+          href={`/leads?approval=${approval.id}`}
+          className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+        >
+          View all leads in this batch <ExternalLink className="h-3 w-3" />
+        </Link>
       </div>
     );
   }

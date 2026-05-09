@@ -438,6 +438,162 @@ Return ONLY valid JSON, no markdown:
 }
 
 /**
+ * Branch a new draft playbook off the client's current live (approved)
+ * playbook. Used by the "Propose Changes" button on the live playbook page.
+ * If there's no live playbook, creates an empty draft (same as
+ * ensureDraftPlaybook). Returns the new draft id.
+ */
+export async function clonePlaybookFromLive(
+  clientId: string,
+): Promise<ActionResult<{ id: string }>> {
+  try {
+    const user = await requireUser();
+    const supabase = createClient();
+
+    const { data: live } = await supabase
+      .from("playbooks")
+      .select("*")
+      .eq("client_id", clientId)
+      .eq("status", "approved")
+      .maybeSingle();
+
+    const { data: latest } = await supabase
+      .from("playbooks")
+      .select("version")
+      .eq("client_id", clientId)
+      .order("version", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const nextVersion = (latest?.version ?? 0) + 1;
+
+    const liveRow = live as Playbook | null;
+    const insert = liveRow
+      ? {
+          client_id: clientId,
+          version: nextVersion,
+          status: "draft" as const,
+          icp: liveRow.icp ?? {},
+          sequences: (liveRow.sequences ?? []) as PlaybookSequenceStep[],
+          escalation_rules: (liveRow.escalation_rules ?? []) as EscalationRule[],
+          channel_flags:
+            (liveRow.channel_flags as ChannelFlags | null) ??
+            { email: true, phone: false, linkedin: false },
+          strategy: (liveRow.strategy ?? {}) as Strategy,
+          voice_tone: (liveRow.voice_tone ?? {}) as VoiceTone,
+          reply_strategy: (liveRow.reply_strategy ?? {}) as ReplyStrategy,
+          team_members: (liveRow.team_members ?? []) as TeamMember[],
+          sales_process: (liveRow.sales_process?.length ? liveRow.sales_process : DEFAULT_SALES_PROCESS) as SalesProcessStage[],
+          notes: liveRow.notes,
+          created_by: user.auth.id,
+        }
+      : {
+          client_id: clientId,
+          version: nextVersion,
+          status: "draft" as const,
+          icp: {},
+          sequences: [],
+          escalation_rules: [],
+          channel_flags: { email: true, phone: false, linkedin: false },
+          strategy: {},
+          voice_tone: {},
+          reply_strategy: {},
+          team_members: [],
+          sales_process: DEFAULT_SALES_PROCESS,
+          created_by: user.auth.id,
+        };
+
+    const { data: row, error } = await supabase
+      .from("playbooks")
+      .insert(insert)
+      .select("id")
+      .single();
+    if (error || !row) return { ok: false, error: error?.message ?? "Insert failed" };
+
+    await logEvent({
+      event_type: "ai_action",
+      client_id: clientId,
+      user_id: user.auth.id,
+      payload: {
+        kind: "playbook_branched",
+        from_playbook_id: liveRow?.id ?? null,
+        from_version: liveRow?.version ?? null,
+        new_playbook_id: row.id,
+        new_version: nextVersion,
+      },
+    });
+
+    revalidatePath("/playbooks");
+    revalidatePath(`/playbooks/${row.id}`);
+    return { ok: true, id: row.id };
+  } catch (err) {
+    return actionError(err);
+  }
+}
+
+/**
+ * HOS direct action: switch which playbook version is live for the client.
+ * No approval queue — use this to roll back to a known-good prior version,
+ * or to manually swap in a draft you trust without re-running approval.
+ *
+ * Demotes the current approved playbook (if any) to draft, then promotes
+ * the supplied playbook to approved.
+ */
+export async function setPlaybookLive(playbookId: string): Promise<ActionResult> {
+  try {
+    const user = await requireUser();
+    const supabase = createClient();
+
+    const { data: pbRow } = await supabase
+      .from("playbooks")
+      .select("*")
+      .eq("id", playbookId)
+      .maybeSingle();
+    if (!pbRow) return { ok: false, error: "Playbook not found" };
+    const playbook = pbRow as Playbook;
+    if (!playbook.client_id) return { ok: false, error: "Playbook has no client" };
+    if (playbook.status === "approved") return { ok: true }; // already live
+
+    const approvedAt = new Date().toISOString();
+
+    // Demote any other approved playbook for this client first
+    await supabase
+      .from("playbooks")
+      .update({ status: "draft" })
+      .eq("client_id", playbook.client_id)
+      .eq("status", "approved")
+      .neq("id", playbook.id);
+
+    const { error } = await supabase
+      .from("playbooks")
+      .update({
+        status: "approved",
+        approved_by: user.auth.id,
+        approved_at: approvedAt,
+      })
+      .eq("id", playbookId);
+    if (error) return { ok: false, error: error.message };
+
+    await logEvent({
+      event_type: "ai_action",
+      client_id: playbook.client_id,
+      user_id: user.auth.id,
+      payload: {
+        kind: "playbook_set_live",
+        playbook_id: playbookId,
+        version: playbook.version,
+      },
+    });
+
+    revalidatePath("/playbooks");
+    revalidatePath(`/playbooks/${playbookId}`);
+    revalidatePath("/dashboard");
+    return { ok: true };
+  } catch (err) {
+    return actionError(err);
+  }
+}
+
+/**
  * Convenience for the Learning Agent (or human ops) to propose changes to the
  * current approved playbook. Produces a strategy_change approval with a diff
  * payload — applied on approval.
