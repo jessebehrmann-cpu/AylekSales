@@ -9,6 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { ApprovalBadge } from "@/components/approval-badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { Users, Upload, Plus } from "lucide-react";
+import { InlineApprovalCell } from "./inline-approval-cell";
+import { ProcessStageCell } from "./process-stage-cell";
+import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
+import type { LeadApprovalStatus, LeadStage, SalesProcessStage } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +25,21 @@ const stageVariants: Record<string, "default" | "success" | "warning" | "destruc
   won: "success",
   lost: "destructive",
   unsubscribed: "muted",
+};
+
+type LeadRow = {
+  id: string;
+  client_id: string | null;
+  company_name: string;
+  contact_name: string | null;
+  title: string | null;
+  suburb: string | null;
+  stage: LeadStage;
+  approval_status: LeadApprovalStatus;
+  process_stage_id: string | null;
+  last_contacted_at: string | null;
+  contract_value: number | null;
+  clients?: { name: string } | null;
 };
 
 export default async function LeadsPage({
@@ -36,7 +55,7 @@ export default async function LeadsPage({
   if (searchParams.approval) {
     const { data: appr } = await supabase
       .from("approvals")
-      .select("title, payload")
+      .select("title, payload, status")
       .eq("id", searchParams.approval)
       .maybeSingle();
     if (appr) {
@@ -69,7 +88,25 @@ export default async function LeadsPage({
     supabase.from("clients").select("id, name").order("name"),
   ]);
 
+  // Pull approved playbooks for every distinct client_id so we can render
+  // process-stage pills + dropdown options. One round trip total.
+  const distinctClientIds = Array.from(
+    new Set(((leads ?? []) as LeadRow[]).map((l) => l.client_id).filter((id): id is string => !!id)),
+  );
+  const stagesByClient = new Map<string, SalesProcessStage[]>();
+  if (distinctClientIds.length > 0) {
+    const { data: pbRows } = await supabase
+      .from("playbooks")
+      .select("client_id, sales_process")
+      .in("client_id", distinctClientIds)
+      .eq("status", "approved");
+    for (const row of (pbRows ?? []) as Array<{ client_id: string; sales_process: SalesProcessStage[] | null }>) {
+      stagesByClient.set(row.client_id, row.sales_process ?? []);
+    }
+  }
+
   const activeFilter = searchParams.client && clients?.find((c) => c.id === searchParams.client)?.name;
+  const showApprovalColumn = !!searchParams.approval;
 
   return (
     <>
@@ -138,33 +175,54 @@ export default async function LeadsPage({
                   <TableHead>Client</TableHead>
                   <TableHead>Contact</TableHead>
                   <TableHead>Title</TableHead>
-                  <TableHead>Suburb</TableHead>
-                  <TableHead>Approval</TableHead>
+                  <TableHead>Process stage</TableHead>
+                  <TableHead>{showApprovalColumn ? "Decide" : "Approval"}</TableHead>
                   <TableHead>Stage</TableHead>
                   <TableHead>Last contact</TableHead>
                   <TableHead className="text-right">Value</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {leads.map((l: { id: string; company_name: string; contact_name: string | null; title: string | null; suburb: string | null; stage: string; approval_status: "pending_approval" | "approved" | "rejected"; last_contacted_at: string | null; contract_value: number | null; clients?: { name: string } | null }) => (
-                  <TableRow key={l.id}>
-                    <TableCell>
-                      <Link href={`/leads/${l.id}`} className="font-medium hover:underline">{l.company_name}</Link>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{l.clients?.name ?? "—"}</TableCell>
-                    <TableCell>{l.contact_name ?? "—"}</TableCell>
-                    <TableCell>{l.title ?? "—"}</TableCell>
-                    <TableCell>{l.suburb ?? "—"}</TableCell>
-                    <TableCell>
-                      <ApprovalBadge status={l.approval_status} />
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={stageVariants[l.stage] ?? "muted"}>{l.stage}</Badge>
-                    </TableCell>
-                    <TableCell>{formatDate(l.last_contacted_at)}</TableCell>
-                    <TableCell className="text-right">{formatCurrency(l.contract_value)}</TableCell>
-                  </TableRow>
-                ))}
+                {(leads as LeadRow[]).map((l) => {
+                  const stages = (l.client_id && stagesByClient.get(l.client_id)) || [];
+                  const inferredStageId =
+                    l.process_stage_id ?? inferProcessStageFromLeadStage(l.stage, stages);
+                  return (
+                    <TableRow key={l.id}>
+                      <TableCell>
+                        <Link href={`/leads/${l.id}`} className="font-medium hover:underline">{l.company_name}</Link>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{l.clients?.name ?? "—"}</TableCell>
+                      <TableCell>{l.contact_name ?? "—"}</TableCell>
+                      <TableCell>{l.title ?? "—"}</TableCell>
+                      <TableCell>
+                        <ProcessStageCell
+                          leadId={l.id}
+                          leadStage={l.stage}
+                          currentStageId={inferredStageId}
+                          stages={stages}
+                          inferredFromLeadStage={l.process_stage_id == null}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        {showApprovalColumn && searchParams.approval ? (
+                          <InlineApprovalCell
+                            leadId={l.id}
+                            approvalId={searchParams.approval}
+                            status={l.approval_status}
+                          />
+                        ) : (
+                          <ApprovalBadge status={l.approval_status} />
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={stageVariants[l.stage] ?? "muted"}>{l.stage}</Badge>
+                      </TableCell>
+                      <TableCell>{formatDate(l.last_contacted_at)}</TableCell>
+                      <TableCell className="text-right">{formatCurrency(l.contract_value)}</TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </CardContent>

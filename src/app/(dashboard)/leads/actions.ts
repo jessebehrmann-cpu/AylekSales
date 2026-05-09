@@ -193,6 +193,61 @@ export async function deleteLeadAndRedirect(leadId: string): Promise<void> {
 }
 
 /**
+ * Halt all outreach for a lead. Flips stage='unsubscribed', cancels every
+ * pending email scheduled for them, logs the change. Used by the
+ * Unsubscribe button on the lead detail page.
+ */
+export async function unsubscribeLead(leadId: string): Promise<ActionResult> {
+  try {
+    const user = await requireUser();
+    const supabase = createClient();
+
+    const { data: lead } = await supabase
+      .from("leads")
+      .select("company_name, client_id, stage")
+      .eq("id", leadId)
+      .maybeSingle();
+    if (!lead) return { ok: false, error: "Lead not found" };
+
+    const { error: leadErr } = await supabase
+      .from("leads")
+      .update({ stage: "unsubscribed" })
+      .eq("id", leadId);
+    if (leadErr) return { ok: false, error: leadErr.message };
+
+    // Cancel every pending email for this lead
+    const { error: emailErr } = await supabase
+      .from("emails")
+      .update({ status: "failed" })
+      .eq("lead_id", leadId)
+      .eq("status", "pending");
+    if (emailErr) {
+      console.error("[unsubscribe] cancel pending emails failed", emailErr);
+    }
+
+    await logEvent({
+      event_type: "stage_changed",
+      lead_id: leadId,
+      client_id: lead.client_id,
+      user_id: user.auth.id,
+      payload: {
+        kind: "unsubscribed_via_button",
+        lead_name: lead.company_name,
+        before: lead.stage,
+        after: "unsubscribed",
+      },
+    });
+
+    revalidatePath(`/leads/${leadId}`);
+    revalidatePath("/leads");
+    revalidatePath("/dashboard");
+    return { ok: true };
+  } catch (err) {
+    return actionError(err);
+  }
+}
+
+/**
  * Manually move a lead to a sales-process stage (clicking a node on the
  * timeline). If the destination stage is owned by a human agent, also log a
  * `human_handoff_required` event so HOS sees the task on the dashboard.

@@ -31,6 +31,12 @@ const ApproveSchema = z.object({
       name: z.string().min(1).max(120),
     })
     .optional(),
+  /**
+   * Optional: when only a subset of the batch should be enrolled (after
+   * per-lead reject decisions), pass the subset here. Defaults to all
+   * lead_ids in the approval payload.
+   */
+  only_lead_ids: z.array(z.string().uuid()).optional(),
 });
 
 const RejectSchema = z.object({
@@ -70,6 +76,7 @@ export async function approveApproval(input: unknown): Promise<ActionResult> {
       const r = await applyLeadListApproval(approval, user.auth.id, {
         campaignId: parsed.data.campaign_id,
         newCampaignName: parsed.data.new_campaign?.name,
+        onlyLeadIds: parsed.data.only_lead_ids,
       });
       if (!r.ok) return r;
       summaryForLog = { kind: "lead_list_approved", ...r.summary };
@@ -176,19 +183,159 @@ export async function rejectApproval(input: unknown): Promise<ActionResult> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Per-lead decisions inside a lead_list approval
+// ──────────────────────────────────────────────────────────────────────────
+
+const PerLeadSchema = z.object({
+  approval_id: z.string().uuid(),
+  lead_id: z.string().uuid(),
+});
+
+/**
+ * Approve a single lead inside a lead_list approval batch (for the inline
+ * Approve buttons on /leads?approval=<id>). Sets that lead's
+ * approval_status='approved'. If every lead in the batch is now decided
+ * (approved or rejected), automatically finalises the parent approval —
+ * enrolling the approved subset into the linked campaign.
+ */
+export async function approveLeadInBatch(input: unknown): Promise<ActionResult<{ batch_finalised: boolean }>> {
+  return decideLeadInBatch(input, "approved");
+}
+
+/**
+ * Reject a single lead inside a lead_list approval batch. Sets that lead's
+ * approval_status='rejected'. Same auto-finalisation rule as approve.
+ */
+export async function rejectLeadInBatch(input: unknown): Promise<ActionResult<{ batch_finalised: boolean }>> {
+  return decideLeadInBatch(input, "rejected");
+}
+
+async function decideLeadInBatch(
+  input: unknown,
+  decision: "approved" | "rejected",
+): Promise<ActionResult<{ batch_finalised: boolean }>> {
+  try {
+    const user = await requireUser();
+    const parsed = PerLeadSchema.safeParse(input);
+    if (!parsed.success) return { ok: false, error: "Invalid input" };
+    const supabase = createClient();
+
+    // Confirm the approval exists, is pending, and the lead is in its batch
+    const { data: apprRow } = await supabase
+      .from("approvals")
+      .select("*")
+      .eq("id", parsed.data.approval_id)
+      .maybeSingle();
+    if (!apprRow) return { ok: false, error: "Approval not found" };
+    const approval = apprRow as Approval;
+    if (approval.type !== "lead_list") {
+      return { ok: false, error: "Per-lead decisions only apply to lead_list approvals" };
+    }
+    if (approval.status !== "pending") {
+      return { ok: false, error: `Already ${approval.status}` };
+    }
+    const allLeadIds = (approval.payload as LeadListPayload | null)?.lead_ids ?? [];
+    if (!allLeadIds.includes(parsed.data.lead_id)) {
+      return { ok: false, error: "Lead is not in this batch" };
+    }
+
+    // Flip the single lead
+    const { error: updErr } = await supabase
+      .from("leads")
+      .update({ approval_status: decision })
+      .eq("id", parsed.data.lead_id);
+    if (updErr) return { ok: false, error: updErr.message };
+
+    await logEvent({
+      event_type: "ai_action",
+      lead_id: parsed.data.lead_id,
+      client_id: approval.client_id,
+      user_id: user.auth.id,
+      payload: {
+        kind: decision === "approved" ? "lead_approved_inline" : "lead_rejected_inline",
+        approval_id: approval.id,
+      },
+    });
+
+    // Now check: are all leads in this batch decided?
+    const { data: batchLeads } = await supabase
+      .from("leads")
+      .select("id, approval_status")
+      .in("id", allLeadIds);
+    const undecided = (batchLeads ?? []).filter(
+      (l) => l.approval_status === "pending_approval",
+    );
+
+    let batch_finalised = false;
+    if (undecided.length === 0) {
+      // All decided — finalise the parent approval. Enrol the approved subset.
+      const approvedSubset = (batchLeads ?? [])
+        .filter((l) => l.approval_status === "approved")
+        .map((l) => l.id);
+
+      if (approvedSubset.length > 0) {
+        const r = await applyLeadListApproval(approval, user.auth.id, {
+          onlyLeadIds: approvedSubset,
+        });
+        if (!r.ok) {
+          // Don't fail the per-lead decision — but surface the issue.
+          console.error("[approvals] auto-finalise failed", r.error);
+          return { ok: true, batch_finalised: false };
+        }
+      }
+
+      // Mark the parent approval as approved regardless of the mix.
+      await supabase
+        .from("approvals")
+        .update({
+          status: "approved",
+          approved_by: user.auth.id,
+          decided_at: new Date().toISOString(),
+        })
+        .eq("id", approval.id);
+
+      await logEvent({
+        event_type: "ai_action",
+        client_id: approval.client_id,
+        user_id: user.auth.id,
+        payload: {
+          kind: "lead_list_auto_finalised",
+          approval_id: approval.id,
+          approved_count: approvedSubset.length,
+          rejected_count: allLeadIds.length - approvedSubset.length,
+        },
+      });
+      batch_finalised = true;
+    }
+
+    revalidatePath("/leads");
+    revalidatePath("/approvals");
+    revalidatePath("/dashboard");
+    return { ok: true, batch_finalised };
+  } catch (err) {
+    return actionError(err);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Internal: apply each type
 // ──────────────────────────────────────────────────────────────────────────
 
 async function applyLeadListApproval(
   approval: Approval,
   userId: string,
-  override?: { campaignId?: string; newCampaignName?: string },
+  override?: { campaignId?: string; newCampaignName?: string; onlyLeadIds?: string[] },
 ): Promise<ActionResult<{ summary: Record<string, unknown> }>> {
   const supabase = createClient();
   const payload = approval.payload as LeadListPayload;
   if (!payload?.lead_ids?.length) {
     return { ok: false, error: "Approval has no lead_ids in payload" };
   }
+  // If a subset was passed (after per-lead rejects), only enrol those.
+  const targetLeadIds =
+    override?.onlyLeadIds && override.onlyLeadIds.length > 0
+      ? override.onlyLeadIds.filter((id) => payload.lead_ids.includes(id))
+      : payload.lead_ids;
 
   // Resolve a campaign:
   //   1. operator-supplied campaign_id (from the approval-card dropdown)
@@ -263,7 +410,7 @@ async function applyLeadListApproval(
   const { data: leads } = await supabase
     .from("leads")
     .select("id, email, company_name, contact_name, stage, client_id")
-    .in("id", payload.lead_ids);
+    .in("id", targetLeadIds);
   const eligible = (leads ?? []).filter(
     (l) => l.email && l.stage !== "unsubscribed" && l.stage !== "won",
   );
@@ -292,14 +439,19 @@ async function applyLeadListApproval(
   // Done after enrolment so a partial-failure mid-update doesn't leave stale
   // pending leads with no campaign attached. Capture (and log) errors here
   // explicitly — earlier silent swallow let stale pending leads accumulate.
+  // Only flip leads we actually enrolled (eligible subset) — rejected leads
+  // already had their status set by the per-lead reject path.
   const { error: leadUpdErr } = await supabase
     .from("leads")
     .update({ approval_status: "approved" })
-    .in("id", payload.lead_ids);
+    .in(
+      "id",
+      eligible.map((l) => l.id),
+    );
   if (leadUpdErr) {
     console.error("[approvals] failed to bulk-update lead approval_status", {
       approval_id: approval.id,
-      lead_ids: payload.lead_ids,
+      lead_ids: targetLeadIds,
       error: leadUpdErr,
     });
     return {
@@ -334,19 +486,46 @@ async function applyLeadListApproval(
       kind: "via_lead_list_approval",
       campaign_name: campaign.name,
       enrolled: eligible.length,
-      ineligible: payload.lead_ids.length - eligible.length,
+      ineligible: targetLeadIds.length - eligible.length,
       approval_id: approval.id,
     },
   });
+
+  // Fast-send trigger: kick the cron route asynchronously so freshly-queued
+  // step-1 emails go out within seconds rather than waiting for the next
+  // hourly cron tick. Fire-and-forget; the cron route is auth-checked by
+  // CRON_SECRET if set, otherwise open in dev. Failures here don't fail the
+  // approval flow.
+  await triggerSendLoopAsync();
 
   return {
     ok: true,
     summary: {
       enrolled: eligible.length,
-      ineligible: payload.lead_ids.length - eligible.length,
+      ineligible: targetLeadIds.length - eligible.length,
       campaign_id: campaign.id,
     },
   };
+}
+
+/**
+ * Best-effort hit of the send-emails cron route. Used after a lead_list
+ * approval is approved so freshly-queued step-1 emails go out within ~5
+ * minutes (rather than waiting for the hourly tick). Fire-and-forget.
+ */
+async function triggerSendLoopAsync(): Promise<void> {
+  const url = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+  const headers: Record<string, string> = {};
+  if (process.env.CRON_SECRET) {
+    headers.Authorization = `Bearer ${process.env.CRON_SECRET}`;
+  }
+  void fetch(`${url}/api/cron/send-emails`, { headers })
+    .then((res) => {
+      if (!res.ok) console.warn("[approvals] send-loop trigger non-OK:", res.status);
+    })
+    .catch((err) => {
+      console.warn("[approvals] send-loop trigger failed:", err);
+    });
 }
 
 async function applyStrategyChangeApproval(

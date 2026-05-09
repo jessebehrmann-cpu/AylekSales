@@ -1,8 +1,20 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "crons": [
     {
       "path": "/api/cron/send-emails",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/agents/learning",
+      "schedule": "0 6 * * *"
     }
-  ]
+  ],
+  "functions": {
+    "src/app/api/cron/send-emails/route.ts": { "maxDuration": 60 },
+    "src/app/api/agents/prospect/route.ts": { "maxDuration": 60 },
+    "src/app/api/agents/learning/route.ts": { "maxDuration": 60 },
+    "src/app/api/webhooks/resend/route.ts": { "maxDuration": 30 },
+    "src/app/api/webhooks/stripe/route.ts": { "maxDuration": 30 }
+  }
 }

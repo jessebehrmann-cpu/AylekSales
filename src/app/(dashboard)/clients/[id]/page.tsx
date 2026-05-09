@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { EditClientForm } from "./edit-client-form";
+import { RunProspectButton } from "./run-prospect-button";
 import { ExternalLink, Users, Send } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -80,6 +81,18 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           </CardContent>
         </Card>
       </div>
+
+      <Card className="mt-6">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle className="text-base">Prospect-01</CardTitle>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Sources contacts via Lusha against this client&apos;s approved playbook ICP. New leads land in the approval queue.
+            </p>
+          </div>
+          <RunProspectButton clientId={client.id} />
+        </CardHeader>
+      </Card>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
         <div className="lg:col-span-2">

@@ -6,9 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert } from "@/components/ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { addLeadNote, deleteLeadAndRedirect, updateLeadStage } from "../actions";
+import { addLeadNote, deleteLeadAndRedirect, unsubscribeLead, updateLeadStage } from "../actions";
 import type { LeadStage } from "@/lib/supabase/types";
-import { Trash2 } from "lucide-react";
+import { Trash2, Ban } from "lucide-react";
 
 const STAGES: LeadStage[] = [
   "new",
@@ -102,6 +102,50 @@ export function DeleteLeadButton({ leadId }: { leadId: string }) {
   return (
     <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={onClick} disabled={pending}>
       <Trash2 className="mr-1.5 h-4 w-4" /> Delete
+    </Button>
+  );
+}
+
+export function UnsubscribeLeadButton({
+  leadId,
+  alreadyUnsubscribed,
+}: {
+  leadId: string;
+  alreadyUnsubscribed: boolean;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+
+  function onClick() {
+    if (!confirm("Unsubscribe this lead? All pending outreach will be cancelled and they'll never be contacted again.")) return;
+    start(async () => {
+      const r = await unsubscribeLead(leadId);
+      if (!r.ok) {
+        alert(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  if (alreadyUnsubscribed) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-xs font-medium text-rose-800">
+        <Ban className="h-3 w-3" /> Unsubscribed
+      </span>
+    );
+  }
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100"
+      onClick={onClick}
+      disabled={pending}
+    >
+      <Ban className="mr-1.5 h-3 w-3" />
+      {pending ? "Unsubscribing…" : "Unsubscribe"}
     </Button>
   );
 }

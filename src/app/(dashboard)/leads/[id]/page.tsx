@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
-import { DeleteLeadButton, NoteForm, StagePicker } from "./lead-actions";
+import { DeleteLeadButton, NoteForm, StagePicker, UnsubscribeLeadButton } from "./lead-actions";
 import { ApprovalBadge } from "@/components/approval-badge";
 import { LeadTimelineCard } from "./lead-timeline";
 import type { Lead, Email, Meeting, AppEvent, SalesProcessStage } from "@/lib/supabase/types";
@@ -61,9 +61,13 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
             .join(" · ") || undefined
         }
         actions={
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <ApprovalBadge status={lead.approval_status} />
             <StagePicker leadId={lead.id} current={lead.stage} />
+            <UnsubscribeLeadButton
+              leadId={lead.id}
+              alreadyUnsubscribed={lead.stage === "unsubscribed"}
+            />
             <DeleteLeadButton leadId={lead.id} />
           </div>
         }
@@ -83,7 +87,7 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
         <div className="space-y-6 lg:col-span-2">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Email thread ({emails?.length ?? 0})</CardTitle>
+              <CardTitle className="text-base">Email history ({emails?.length ?? 0})</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               {!emails || emails.length === 0 ? (
@@ -91,17 +95,32 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
               ) : (
                 emails.map((e) => (
                   <div key={e.id} className="rounded border p-3 text-sm">
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>
-                        {e.direction === "inbound" ? "← inbound" : "→ outbound"} · {e.status}
-                        {e.step_number != null && ` · step ${e.step_number}`}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-medium text-foreground">
+                          {e.direction === "inbound" ? "← inbound" : "→ outbound"}
+                        </span>
+                        {e.step_number != null && (
+                          <span className="rounded-full border bg-muted px-1.5 py-0.5 text-[10px]">
+                            step {e.step_number}
+                          </span>
+                        )}
+                        <EmailStatusPill email={e} />
                       </span>
-                      <span>{formatDateTime(e.sent_at ?? e.created_at)}</span>
+                      <span>
+                        {e.sent_at
+                          ? `Sent ${formatDateTime(e.sent_at)}`
+                          : `Queued ${formatDateTime(e.created_at)}`}
+                      </span>
                     </div>
                     <p className="mt-1 font-medium">{e.subject ?? "(no subject)"}</p>
                     {e.body && (
                       <p className="mt-2 whitespace-pre-line text-muted-foreground">{e.body}</p>
                     )}
+                    <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+                      {e.opened_at && <span>👁  Opened {formatDateTime(e.opened_at)}</span>}
+                      {e.replied_at && <span>↩  Replied {formatDateTime(e.replied_at)}</span>}
+                    </div>
                     {e.reply_body && (
                       <div className="mt-2 rounded bg-muted px-2 py-1.5">
                         <p className="text-xs uppercase text-muted-foreground">Reply:</p>
@@ -215,4 +234,30 @@ function summarisePayload(payload: Record<string, unknown>): string {
     }
   }
   return parts.join(" · ");
+}
+
+function EmailStatusPill({ email }: { email: Email }) {
+  const variant: { label: string; klass: string } = (() => {
+    switch (email.status) {
+      case "pending":
+        return { label: "queued", klass: "bg-muted text-muted-foreground" };
+      case "sent":
+        return { label: "sent", klass: "bg-emerald-100 text-emerald-800" };
+      case "opened":
+        return { label: "opened", klass: "bg-amber-100 text-amber-800" };
+      case "replied":
+        return { label: "replied", klass: "bg-emerald-200 text-emerald-900" };
+      case "bounced":
+        return { label: "bounced", klass: "bg-rose-100 text-rose-800" };
+      case "failed":
+        return { label: "failed", klass: "bg-rose-100 text-rose-800" };
+      default:
+        return { label: String(email.status), klass: "bg-muted text-muted-foreground" };
+    }
+  })();
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${variant.klass}`}>
+      {variant.label}
+    </span>
+  );
 }

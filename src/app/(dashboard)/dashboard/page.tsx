@@ -5,10 +5,17 @@ import { formatDateTime, formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Upload, Send, Hand } from "lucide-react";
+import { SalesFunnel, type StageCount } from "./sales-funnel";
+import type { SalesProcessStage } from "@/lib/supabase/types";
+import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: { client?: string };
+}) {
   const supabase = createClient();
 
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -75,6 +82,47 @@ export default async function DashboardPage() {
     { label: "Revenue won (30d)", value: formatCurrency(wonValue) },
   ];
 
+  // ── Funnel data ────────────────────────────────────────────────────────
+  // Pull active clients with approved playbooks (so the funnel has stages).
+  // If a client param is supplied, use it; otherwise default to the first.
+  const { data: activeClientRows } = await supabase
+    .from("clients")
+    .select("id, name")
+    .eq("status", "active")
+    .order("name");
+  const clientOptions = (activeClientRows ?? []) as Array<{ id: string; name: string }>;
+  const selectedClientId = searchParams.client ?? clientOptions[0]?.id ?? null;
+
+  let funnelStages: SalesProcessStage[] = [];
+  let funnelCounts: StageCount[] = [];
+  if (selectedClientId) {
+    const { data: pbRow } = await supabase
+      .from("playbooks")
+      .select("sales_process")
+      .eq("client_id", selectedClientId)
+      .eq("status", "approved")
+      .maybeSingle();
+    funnelStages = ((pbRow as { sales_process?: SalesProcessStage[] } | null)?.sales_process ?? []) as SalesProcessStage[];
+
+    if (funnelStages.length > 0) {
+      const { data: clientLeads } = await supabase
+        .from("leads")
+        .select("stage, process_stage_id")
+        .eq("client_id", selectedClientId);
+      const aggregate = new Map<string, number>();
+      for (const l of (clientLeads ?? []) as Array<{ stage: string; process_stage_id: string | null }>) {
+        const stageId = l.process_stage_id ?? inferProcessStageFromLeadStage(l.stage, funnelStages);
+        if (!stageId) continue;
+        aggregate.set(stageId, (aggregate.get(stageId) ?? 0) + 1);
+      }
+      funnelCounts = funnelStages.map((s) => ({
+        stageId: s.id,
+        name: s.name,
+        count: aggregate.get(s.id) ?? 0,
+      }));
+    }
+  }
+
   return (
     <>
       {(pendingApprovals ?? 0) > 0 && (
@@ -130,6 +178,15 @@ export default async function DashboardPage() {
             </CardContent>
           </Card>
         ))}
+      </div>
+
+      <div className="mt-8">
+        <SalesFunnel
+          clientOptions={clientOptions}
+          selectedClientId={selectedClientId}
+          stages={funnelStages}
+          counts={funnelCounts}
+        />
       </div>
 
       <div className="mt-8">
