@@ -6,7 +6,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
-import { Check, X, Search, RefreshCw } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Check, X, Search, RefreshCw, Plus } from "lucide-react";
 import { approveApproval, rejectApproval } from "./actions";
 import type {
   Approval,
@@ -16,8 +25,17 @@ import type {
 import { formatDateTime } from "@/lib/utils";
 
 type ApprovalRow = Approval & { clients: { name: string } | null };
+type CampaignOption = { id: string; name: string; status: string; client_id: string | null };
 
-export function ApprovalCard({ approval }: { approval: ApprovalRow }) {
+const NEW_CAMPAIGN_VALUE = "__new__";
+
+export function ApprovalCard({
+  approval,
+  clientCampaigns = [],
+}: {
+  approval: ApprovalRow;
+  clientCampaigns?: CampaignOption[];
+}) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -29,11 +47,56 @@ export function ApprovalCard({ approval }: { approval: ApprovalRow }) {
       ? "bg-emerald-100 text-emerald-700"
       : "bg-purple-100 text-purple-700";
 
+  // Lead-list approvals: resolve a campaign at decision time.
+  const leadListPayload =
+    approval.type === "lead_list" ? (approval.payload as LeadListPayload) : null;
+  const payloadCampaignId = leadListPayload?.campaign_id ?? null;
+  const needsCampaignChoice = approval.type === "lead_list" && !payloadCampaignId;
+
+  // Default selection: if payload already has a campaign, lock to that; else
+  // first eligible client campaign; else "create new".
+  const initialChoice =
+    payloadCampaignId ??
+    clientCampaigns[0]?.id ??
+    (needsCampaignChoice ? NEW_CAMPAIGN_VALUE : "");
+  const [campaignChoice, setCampaignChoice] = useState<string>(initialChoice);
+  const [newCampaignName, setNewCampaignName] = useState<string>("");
+
   function onApprove() {
     setError(null);
-    if (!confirm(approval.type === "lead_list" ? "Approve and start outreach?" : "Approve this strategy change?")) return;
+
+    type ApproveBody = {
+      id: string;
+      campaign_id?: string;
+      new_campaign?: { name: string };
+    };
+    const body: ApproveBody = { id: approval.id };
+    if (approval.type === "lead_list" && needsCampaignChoice) {
+      if (campaignChoice === NEW_CAMPAIGN_VALUE) {
+        if (!newCampaignName.trim()) {
+          setError("Name the new campaign before approving.");
+          return;
+        }
+        body.new_campaign = { name: newCampaignName.trim() };
+      } else if (campaignChoice) {
+        body.campaign_id = campaignChoice;
+      } else {
+        setError("Pick a campaign for these leads.");
+        return;
+      }
+    }
+
+    if (
+      !confirm(
+        approval.type === "lead_list"
+          ? "Approve and start outreach?"
+          : "Approve this strategy change?",
+      )
+    )
+      return;
+
     start(async () => {
-      const r = await approveApproval({ id: approval.id });
+      const r = await approveApproval(body);
       if (!r.ok) {
         setError(r.error);
         return;
@@ -81,7 +144,57 @@ export function ApprovalCard({ approval }: { approval: ApprovalRow }) {
 
         <PayloadDetail approval={approval} />
 
-        {error && <Alert variant="destructive" className="mt-3">{error}</Alert>}
+        {/* Campaign picker — only for lead_list approvals without a campaign_id baked in */}
+        {isPending && needsCampaignChoice && (
+          <div className="mt-4 space-y-3 rounded-lg border border-amber-200 bg-amber-50/40 p-3">
+            <div className="space-y-1.5">
+              <Label htmlFor={`campaign-${approval.id}`} className="text-xs uppercase tracking-wider">
+                Send these leads to
+              </Label>
+              <Select value={campaignChoice} onValueChange={setCampaignChoice}>
+                <SelectTrigger id={`campaign-${approval.id}`}>
+                  <SelectValue placeholder="Pick a campaign…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {clientCampaigns.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}{" "}
+                      <span className="ml-1 text-xs text-muted-foreground">· {c.status}</span>
+                    </SelectItem>
+                  ))}
+                  <SelectItem value={NEW_CAMPAIGN_VALUE}>
+                    + Create a new campaign
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {campaignChoice === NEW_CAMPAIGN_VALUE && (
+              <div className="space-y-1.5">
+                <Label htmlFor={`new-name-${approval.id}`} className="text-xs uppercase tracking-wider flex items-center gap-1">
+                  <Plus className="h-3 w-3" /> New campaign name
+                </Label>
+                <Input
+                  id={`new-name-${approval.id}`}
+                  value={newCampaignName}
+                  onChange={(e) => setNewCampaignName(e.target.value)}
+                  placeholder="e.g. Q3 Outbound — APAC"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Uses this client&apos;s approved playbook sequence. Will activate immediately.
+                </p>
+              </div>
+            )}
+            {clientCampaigns.length === 0 && campaignChoice !== NEW_CAMPAIGN_VALUE && (
+              <p className="text-xs text-amber-800">
+                No campaigns yet for this client — create one to enrol these leads.
+              </p>
+            )}
+          </div>
+        )}
+
+        {error && error !== "needs_campaign" && (
+          <Alert variant="destructive" className="mt-3">{error}</Alert>
+        )}
 
         {isPending && (
           <div className="mt-4 flex gap-2">
@@ -126,9 +239,6 @@ function PayloadDetail({ approval }: { approval: Approval }) {
           <span className="font-medium text-foreground">{p.lead_ids?.length ?? 0}</span> leads in this batch
           {p.source && ` · sourced from ${p.source}`}
         </p>
-        {!p.campaign_id && (
-          <p className="text-amber-700">No campaign attached — approval will fail until one is set.</p>
-        )}
       </div>
     );
   }

@@ -19,7 +19,7 @@ export default async function ApprovalsPage({
   const supabase = createClient();
   const status = (searchParams.status as Approval["status"] | undefined) ?? "pending";
 
-  const [{ data: rows, error: rowsErr }, pendingCountRes, approvedCountRes, rejectedCountRes] = await Promise.all([
+  const [{ data: rows, error: rowsErr }, pendingCountRes, approvedCountRes, rejectedCountRes, campaignsRes] = await Promise.all([
     supabase
       .from("approvals")
       .select("*, clients(name)")
@@ -29,6 +29,10 @@ export default async function ApprovalsPage({
     supabase.from("approvals").select("id", { count: "exact", head: true }).eq("status", "pending"),
     supabase.from("approvals").select("id", { count: "exact", head: true }).eq("status", "approved"),
     supabase.from("approvals").select("id", { count: "exact", head: true }).eq("status", "rejected"),
+    supabase
+      .from("campaigns")
+      .select("id, name, status, client_id")
+      .neq("status", "complete"),
   ]);
 
   if (rowsErr) {
@@ -36,6 +40,7 @@ export default async function ApprovalsPage({
   }
 
   const approvals = (rows ?? []) as unknown as ApprovalRow[];
+  const allCampaigns = (campaignsRes.data ?? []) as Array<{ id: string; name: string; status: string; client_id: string | null }>;
 
   const tabs: Array<{ key: Approval["status"]; label: string; count: number }> = [
     { key: "pending", label: "Pending", count: pendingCountRes.count ?? 0 },
@@ -86,7 +91,11 @@ export default async function ApprovalsPage({
       ) : (
         <div className="space-y-3">
           {approvals.map((a) => (
-            <ApprovalCard key={a.id} approval={a} />
+            <ApprovalCard
+              key={a.id}
+              approval={a}
+              clientCampaigns={allCampaigns.filter((c) => c.client_id === a.client_id)}
+            />
           ))}
         </div>
       )}

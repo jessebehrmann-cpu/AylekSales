@@ -14,7 +14,25 @@ import type {
   StrategyChangePayload,
 } from "@/lib/supabase/types";
 
-const ApproveSchema = z.object({ id: z.string().uuid() });
+const ApproveSchema = z.object({
+  id: z.string().uuid(),
+  /**
+   * Optional override for lead_list approvals where the payload doesn't
+   * already carry a campaign_id. The HOS picks one in the approval card.
+   */
+  campaign_id: z.string().uuid().optional(),
+  /**
+   * Optional: create a new campaign on the fly when there's no existing one
+   * for the client. The new campaign uses the client's approved playbook
+   * sequence, so the DB hard gate is satisfied automatically.
+   */
+  new_campaign: z
+    .object({
+      name: z.string().min(1).max(120),
+    })
+    .optional(),
+});
+
 const RejectSchema = z.object({
   id: z.string().uuid(),
   reason: z.string().max(1000).optional(),
@@ -49,7 +67,10 @@ export async function approveApproval(input: unknown): Promise<ActionResult> {
     let summaryForLog: Record<string, unknown> = {};
 
     if (approval.type === "lead_list") {
-      const r = await applyLeadListApproval(approval, user.auth.id);
+      const r = await applyLeadListApproval(approval, user.auth.id, {
+        campaignId: parsed.data.campaign_id,
+        newCampaignName: parsed.data.new_campaign?.name,
+      });
       if (!r.ok) return r;
       summaryForLog = { kind: "lead_list_approved", ...r.summary };
     } else if (approval.type === "strategy_change") {
@@ -161,16 +182,60 @@ export async function rejectApproval(input: unknown): Promise<ActionResult> {
 async function applyLeadListApproval(
   approval: Approval,
   userId: string,
+  override?: { campaignId?: string; newCampaignName?: string },
 ): Promise<ActionResult<{ summary: Record<string, unknown> }>> {
   const supabase = createClient();
   const payload = approval.payload as LeadListPayload;
   if (!payload?.lead_ids?.length) {
     return { ok: false, error: "Approval has no lead_ids in payload" };
   }
-  if (!payload.campaign_id) {
+
+  // Resolve a campaign:
+  //   1. operator-supplied campaign_id (from the approval-card dropdown)
+  //   2. operator-requested "new campaign" — create one using the client's
+  //      approved playbook sequence
+  //   3. fall back to payload.campaign_id (the seeded / agent-set value)
+  // If none of those work, return a structured error the UI can use to render
+  // a campaign picker rather than a hard block.
+  let campaignId = override?.campaignId ?? payload.campaign_id ?? null;
+
+  if (!campaignId && override?.newCampaignName) {
+    if (!approval.client_id) {
+      return { ok: false, error: "Approval has no client_id — can't create a campaign" };
+    }
+    const { data: approvedPb } = await supabase
+      .from("playbooks")
+      .select("sequences")
+      .eq("client_id", approval.client_id)
+      .eq("status", "approved")
+      .maybeSingle();
+    if (!approvedPb || !Array.isArray((approvedPb as { sequences?: unknown }).sequences) || ((approvedPb as { sequences?: unknown[] }).sequences ?? []).length === 0) {
+      return {
+        ok: false,
+        error: "Client has no approved playbook with a sequence — approve one first.",
+      };
+    }
+    const { data: created, error: cErr } = await supabase
+      .from("campaigns")
+      .insert({
+        client_id: approval.client_id,
+        name: override.newCampaignName,
+        status: "draft",
+        sequence_steps: (approvedPb as { sequences: PlaybookSequenceStep[] }).sequences,
+        created_by: userId,
+      })
+      .select("id")
+      .single();
+    if (cErr || !created) {
+      return { ok: false, error: cErr?.message ?? "Failed to create campaign" };
+    }
+    campaignId = created.id;
+  }
+
+  if (!campaignId) {
     return {
       ok: false,
-      error: "Approval has no campaign_id — attach one before approving",
+      error: "needs_campaign", // UI: render the campaign picker
     };
   }
 
@@ -178,7 +243,7 @@ async function applyLeadListApproval(
   const { data: campaignRow } = await supabase
     .from("campaigns")
     .select("*")
-    .eq("id", payload.campaign_id)
+    .eq("id", campaignId)
     .maybeSingle();
   if (!campaignRow) return { ok: false, error: "Campaign not found" };
   const campaign = campaignRow as {

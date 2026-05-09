@@ -347,6 +347,19 @@ export type TeamMember = {
   email: string;
 };
 
+/**
+ * One stage of the client's sales process. Agents read this to know what
+ * stage they're operating in and what comes next. The `agent` field is the
+ * canonical handle of the agent responsible (e.g. "prospect-01",
+ * "outreach-01", "hos", "human-rep"). Fully customisable per client.
+ */
+export type SalesProcessStage = {
+  id: string;
+  name: string;
+  description: string;
+  agent: string;
+};
+
 export type Playbook = {
   id: string;
   client_id: string;
@@ -360,6 +373,7 @@ export type Playbook = {
   voice_tone: VoiceTone;
   reply_strategy: ReplyStrategy;
   team_members: TeamMember[];
+  sales_process: SalesProcessStage[];
   notes: string | null;
   created_by: string | null;
   approved_by: string | null;

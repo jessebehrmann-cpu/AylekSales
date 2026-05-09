@@ -195,12 +195,22 @@ if (agentToInsert.length > 0) {
   console.log(`    ${agentLeads.length} already present`);
 }
 
-// Lead-list approval — only create if there's no pending one already
+// Lead-list approval — only create if there's no pending one already.
+// We pre-link it to the existing Acme campaign if one exists (or to whatever
+// campaign id ends up created later in step 7). The approval card supports
+// re-routing to a different campaign at approval time, so this is just a
+// reasonable default.
 const existingLeadListApproval = (
   await rest(
     `approvals?client_id=eq.${acme.id}&type=eq.lead_list&status=eq.pending&select=id&limit=1`,
   )
 )[0];
+const existingActiveCampaign = (
+  await rest(
+    `campaigns?client_id=eq.${acme.id}&status=neq.complete&select=id,name&order=created_at.desc&limit=1`,
+  )
+)[0];
+
 if (!existingLeadListApproval && agentLeads.length > 0) {
   const leadListApproval = (
     await rest(`approvals`, {
@@ -210,16 +220,21 @@ if (!existingLeadListApproval && agentLeads.length > 0) {
         type: "lead_list",
         status: "pending",
         title: `Prospect-01 sourced ${agentLeads.length} new leads`,
-        summary: `${agentLeads.length} agent-sourced leads matching the approved ICP. Review and approve to enrol them.`,
+        summary: `${agentLeads.length} agent-sourced leads matching the approved ICP. Review and approve to enrol them${existingActiveCampaign ? ` into ${existingActiveCampaign.name}` : ""}.`,
         payload: {
           lead_ids: agentLeads.map((l) => l.id),
           source: "prospect-01",
+          campaign_id: existingActiveCampaign?.id ?? null,
         },
+        related_campaign_id: existingActiveCampaign?.id ?? null,
         created_by: hosAuthUser.id,
       }),
     })
   )[0];
-  console.log("    pending lead_list approval:", leadListApproval.id);
+  console.log(
+    `    pending lead_list approval: ${leadListApproval.id}` +
+      (existingActiveCampaign ? ` → ${existingActiveCampaign.name}` : " (no campaign yet — picker will surface)"),
+  );
 } else if (existingLeadListApproval) {
   console.log("    pending lead_list approval already exists:", existingLeadListApproval.id);
 }
@@ -294,6 +309,17 @@ if (draft) {
         team_members: [
           { id: cryptoId(), name: "Jesse Behrmann", title: "Head of Sales", email: "jesse@aylek.dev" },
           { id: cryptoId(), name: "Sarah Chen", title: "CEO, Acme Corp", email: "sarah@acme.example.com" },
+        ],
+        sales_process: [
+          { id: "prospect", name: "Prospect", description: "Source and qualify leads matching the ICP.", agent: "prospect-01" },
+          { id: "outreach", name: "Outreach", description: "Run the email sequence. Pause when a reply lands.", agent: "outreach-01" },
+          { id: "book_meeting", name: "Book meeting", description: "Convert positive replies into a calendar booking.", agent: "scheduler-01" },
+          { id: "have_meeting", name: "Have meeting", description: "Discovery call. Owned by a human rep.", agent: "human-rep" },
+          { id: "send_proposal", name: "Send proposal", description: "Draft + send a proposal based on meeting notes.", agent: "proposal-01" },
+          { id: "execute_contract", name: "Execute contract", description: "Send the contract, chase signatures.", agent: "contract-01" },
+          { id: "payment", name: "Payment", description: "Issue invoice, confirm receipt.", agent: "billing-01" },
+          { id: "onboard", name: "Onboard", description: "Kick-off call and onboarding tasks.", agent: "onboarding-01" },
+          { id: "handover", name: "Handover", description: "Transition to account management / fulfilment.", agent: "account-mgmt" },
         ],
         sequences: [
           {

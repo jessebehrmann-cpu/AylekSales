@@ -21,10 +21,12 @@ import type {
   Playbook,
   PlaybookSequenceStep,
   ReplyStrategy,
+  SalesProcessStage,
   Strategy,
   TeamMember,
   VoiceTone,
 } from "@/lib/supabase/types";
+import { DEFAULT_SALES_PROCESS } from "@/lib/playbook-defaults";
 
 const ICPSchema = z.object({
   industries: z.array(z.string()).optional(),
@@ -100,6 +102,13 @@ const TeamMemberSchema = z.object({
   email: z.string().email(),
 });
 
+const SalesProcessStageSchema = z.object({
+  id: z.string().min(1).max(60),
+  name: z.string().min(1).max(120),
+  description: z.string().max(1000),
+  agent: z.string().max(60),
+});
+
 /**
  * Create an empty draft playbook for a client. Idempotent — if a draft already
  * exists, returns it instead of creating another.
@@ -142,6 +151,7 @@ export async function ensureDraftPlaybook(clientId: string): Promise<ActionResul
         voice_tone: {},
         reply_strategy: {},
         team_members: [],
+        sales_process: DEFAULT_SALES_PROCESS,
         created_by: user.auth.id,
       })
       .select("id")
@@ -165,6 +175,7 @@ const SaveDraftSchema = z.object({
   voice_tone: VoiceToneSchema.optional(),
   reply_strategy: ReplyStrategySchema.optional(),
   team_members: z.array(TeamMemberSchema).optional(),
+  sales_process: z.array(SalesProcessStageSchema).optional(),
   notes: z.string().max(4000).optional().nullable(),
 });
 
@@ -209,6 +220,8 @@ export async function saveDraftPlaybook(input: unknown): Promise<ActionResult> {
       update.reply_strategy = parsed.data.reply_strategy as ReplyStrategy;
     if (parsed.data.team_members !== undefined)
       update.team_members = parsed.data.team_members as TeamMember[];
+    if (parsed.data.sales_process !== undefined)
+      update.sales_process = parsed.data.sales_process as SalesProcessStage[];
     if (parsed.data.notes !== undefined) update.notes = parsed.data.notes;
 
     const { error } = await supabase.from("playbooks").update(update).eq("id", parsed.data.id);
