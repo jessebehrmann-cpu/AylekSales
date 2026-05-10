@@ -28,19 +28,24 @@ export default async function OnboardingPage({
     | null;
   if (!session) notFound();
 
-  const clientName = session.clients?.name ?? "your company";
+  // Prefer the contact-supplied company name (captured on the intro slide)
+  // over the internal clients.name. When the contact hasn't done the intro
+  // yet, fall back to the internal name only as a last resort — the intro
+  // slide will overwrite it before any client-facing greeting renders.
+  const internalClientName = session.clients?.name ?? "your company";
+  const displayClientName = session.answers?.company_name ?? internalClientName;
   const initialQuestion =
     session.status === "approved" || session.status === "playbook_generated"
       ? null
       : await generateNextQuestion({
-          client: { name: clientName },
+          client: { name: displayClientName },
           answers: session.answers ?? {},
         });
 
   return (
     <OnboardingClient
       token={params.token}
-      clientName={clientName}
+      clientName={displayClientName}
       initialStatus={session.status}
       initialAnswers={session.answers ?? {}}
       initialPlaybook={session.generated_playbook}

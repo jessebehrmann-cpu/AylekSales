@@ -528,6 +528,13 @@ export type OnboardingAnswers = {
   notes?: string;
   /** Set when the contact has clicked "I'm done" — terminates the loop. */
   done?: boolean;
+  /** First name the contact gave at the intro slide. Used to personalise
+   *  every subsequent question and the generated content. */
+  contact_name?: string;
+  /** Company name the contact gave at the intro slide. Authoritative
+   *  display name for the public onboarding page; the linked
+   *  clients.name is internal. */
+  company_name?: string;
   /** Per-section client approvals. The whole-playbook write only happens
    *  when every section is true. */
   section_approvals?: Partial<Record<OnboardingSectionId, boolean>>;

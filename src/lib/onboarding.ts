@@ -155,14 +155,19 @@ export async function generateNextQuestion(args: {
   answers: OnboardingAnswers;
 }): Promise<NextQuestion> {
   const { client, answers } = args;
+  // Prefer the contact-supplied company + name (set on the intro slide) over
+  // the internal client record.
+  const companyName = (answers.company_name ?? client.name ?? "your company").trim();
+  const contactName = (answers.contact_name ?? "").trim();
   const state = deriveInterviewState(answers);
   const turns = answers.questions ?? [];
 
   // Wrap-up — deterministic, no Claude call.
   if (state.ready_to_complete) {
+    const namePart = contactName ? `${contactName}, ` : "";
     return {
       topic: "wrap_up",
-      question: `Thanks — that covers everything I need from you for ${client.name}. Anything else you want to add before I draft your playbook? If not, hit "I'm done" and I'll get to work.`,
+      question: `${namePart}that covers everything I need. Anything else worth knowing before I put it all together? If not, hit "I'm done" and I'll get to work.`,
       ready_to_complete: true,
     };
   }
@@ -196,9 +201,9 @@ export async function generateNextQuestion(args: {
     .map((t, i) => `${i + 1}. ${t.question}`)
     .join("\n");
 
-  const system = `You are a senior B2B sales strategist conducting a warm, intelligent onboarding interview for a real founder/operator. You have deep working knowledge of the contact's industry — your knowledge sharpens with every answer they give. You ask ONE question at a time. Every question after the first OPENS by referencing a specific phrase, fact, or detail the contact has already said — not a generic "thanks for sharing" but an actual callback ("You mentioned restaurants and bars — …"). You ask the kind of question a great strategist would ask: one that surfaces an insight the contact may not have thought of, or sharpens an answer that was vague. Tone is warm, confident, expert. You never list multiple questions, never use lists, never repeat or rephrase a question that has already been asked, and you never sound like a generic form. Each question is 1-2 sentences and under 240 characters.`;
+  const system = `You are a senior B2B sales strategist conducting a warm, intelligent onboarding interview for a real founder/operator. You have deep working knowledge of the contact's industry — your knowledge sharpens with every answer they give. You address the contact by their first name when they've told you their name. You ask ONE question at a time. Every question after the first OPENS by referencing a specific phrase, fact, or detail the contact has already said — not a generic "thanks for sharing" but an actual callback ("You mentioned restaurants and bars — …"). You ask the kind of question a great strategist would ask: one that surfaces an insight the contact may not have thought of, or sharpens an answer that was vague. Tone is warm, confident, expert. You never list multiple questions, never use lists, never repeat or rephrase a question that has already been asked, and you never sound like a generic form. Each question is 1-2 sentences and under 240 characters.`;
 
-  const prompt = `Client company: ${client.name}
+  const prompt = `Contact: ${contactName || "(unknown)"} at ${companyName}
 
 FULL CONVERSATION SO FAR (read every word — your next question must show you read it)
 ${transcriptBlock}
@@ -320,25 +325,57 @@ export async function generatePlaybookFromInterview(args: {
     };
   }
 
-  const system = `You are a senior B2B sales strategist AND a senior B2B copywriter who specializes in the contact's industry. You are given a transcript of an onboarding interview with a real founder/operator. You produce a single complete playbook that reads like it was custom-built for THIS client by someone who has worked in their space for years.
+  const system = `You are a top-tier B2B sales consultant AND a senior B2B copywriter who specializes in the contact's industry. The interview gave you raw, unpolished input from a busy founder. Your job is to INTERPRET, ELEVATE, and PROFESSIONALISE everything they said into a polished, ready-to-run sales system that reads as if a top-tier consultant spent a day on it.
 
-Hard rules:
-- ICP must name SPECIFIC job titles and SPECIFIC company-type filters drawn directly from what the contact said. No generic titles like "Decision Maker" or vague company types.
-- strategy.value_proposition must use the contact's own framing of the problem they solve — pull their exact phrasing where it works.
-- strategy.key_messages must use the contact's stated differentiators verbatim where possible. No generic "we're better/faster/cheaper" language.
-- strategy.proof_points must reference specifics the contact gave (named verticals, named outcomes, named processes). If they didn't give any, leave the array empty rather than fabricate.
-- voice_tone must reflect EXACTLY how the contact described their own communication style. If they said "casual and direct, no corporate fluff," voice_tone reflects that — not a generic professional tone.
-- The 3-step email sequence must read like a senior copywriter who deeply knows their industry wrote it. NEVER use: "I hope this finds you well", "circling back", "just touching base", "synergy", "leverage", or any other template language. Every line must feel like it could only have been written for this specific client. Use the contact's own vocabulary. Reference the contact's industry by name if relevant.
-- sales_process conditions must reflect any explicit rules the contact stated. If they said "only book a meeting if the prospect explicitly asks," that EXACT rule goes in the relevant stage's condition. If no rule was stated for a stage, use null.
-- If the contact didn't cover something, use a sensible default that fits the rest of their answers AND call it out in notes.
-- NO INVENTED FACTS. If you can't anchor a field on a specific quote or fact from the transcript, leave it empty / use a minimal default and note the gap in notes.
+CORE PRINCIPLE — DO NOT REPEAT VERBATIM
+Never paste the contact's words straight into output fields. Their answers are raw input. Your job is to translate informal/rough/vague language into confident, polished sales language while preserving the meaning. "we help restaurants get more reviews" becomes a sharp value proposition; "people are scared of bad reviews" becomes a confident objection rebuttal. The output should feel like the work of a senior strategist, not a transcript.
+
+ICP — be specific AND infer adjacent fits
+- industries: name specific industries by their proper names (e.g. "Food & Beverage", "Hospitality", "Independent Retail", "Healthcare Services", "Professional Services"). If the contact mentioned restaurants and bars, INCLUDE adjacent fits they didn't name explicitly that clearly belong: cafes, breweries, hotel F&B, nightlife venues, hospitality groups.
+- target_titles: name specific real job titles (e.g. "General Manager", "Operations Manager", "Owner", "Area Manager", "Marketing Manager", "Director of Operations"). Infer the titles you'd actually email at the company types listed — don't repeat what the contact wrote if it was vague.
+- company_size: a real range like "5-50 employees" or "20-200 employees", informed by typical company sizes in those industries.
+- qualification_signal: one crisp sentence on how to spot a fit lead.
+- disqualifiers: real disqualifying signals (e.g. "publicly traded chains over 500 locations", "venues with no online presence").
+
+strategy
+- value_proposition: rewrite the contact's rough framing as a polished, confident 1-2 sentence value prop in third-person. NOT a quote.
+- key_messages: 3-5 concise, sharp messages a sales rep could land in a single line. Built FROM the contact's differentiators, but rewritten with sales-grade clarity.
+- proof_points: concrete proof points (named outcomes, named verticals, named processes the contact described). Empty array if no real proof was given — never fabricate.
+- objection_responses: rewrite each objection as a clean one-liner; rewrite each response as a confident, concise rebuttal that lands. Sales coach voice.
+
+voice_tone
+- INTERPRET what the contact said about their style and codify it. "we're casual and direct, no corporate fluff" becomes:
+  tone_descriptors: ["direct", "casual but professional", "no jargon"]
+  writing_style: "Short sentences. Plain English. First person. Skip the corporate intro — get to the point in line 1."
+  avoid: ["corporate jargon", "I hope this finds you well", "long preambles", ...]
+  example_phrases: 3 short example phrases in the codified voice.
+
+reply_strategy
+- Templated replies for interested / not_now / wrong_person / objection. Each template uses the codified voice. NOT generic.
+
+team_members
+- Parse from what the contact provided. Real names, titles, emails. Empty array if none given.
+
+sales_process
+- Use the canonical 9 stages with the canonical agent handles (prospect-01, outreach-01, sales-01, handover-01, human). Descriptions should be one short polished sentence each, written for the client's industry context.
+- conditions: lift any explicit rules the contact stated and put them on the relevant stage. E.g. "only book a meeting if the prospect explicitly asks" goes on book_meeting. null when no rule.
+
+sequences (3 steps)
+- This is the highest-stakes section. Write it like a senior B2B copywriter who specialises in the contact's industry — someone who's written 10,000 of these and knows what lands.
+- Subject lines: short, specific, NEVER generic ("Quick question about {company_name}'s reviews" beats "Following up").
+- Bodies: 4-7 sentences max, no preamble, opens with substance, ends with one sharp ask. Use the contact's vocabulary and industry context.
+- BLOCKED phrases (NEVER use any of these): "I hope this finds you well", "circling back", "just touching base", "wanted to reach out", "synergy", "leverage", "thought I'd check in", "bumping this up". If you catch yourself writing one, rewrite the line.
+- Use {{contact_name}} and {{company_name}} placeholders for the lead's name + company.
+
+NO INVENTED FACTS. If something genuinely wasn't covered, fill it with the most reasonable inference for that industry AND mention the inference in notes so the contact can correct it.
 
 You ALWAYS return a single JSON object matching the exact schema requested. No markdown, no commentary.`;
 
   const userBlock = `CLIENT
-Company: ${client.name}
+Company: ${answers.company_name ?? client.name}
+Primary contact: ${answers.contact_name ?? "(unknown)"}
 
-INTERVIEW TRANSCRIPT (Q + A turns)
+INTERVIEW TRANSCRIPT (Q + A turns) — RAW INPUT, do not paste verbatim into output
 ${turns
   .map((t, i) => `${i + 1}. [${t.topic}] Q: ${t.question}\n   A: ${t.answer}`)
   .join("\n\n")}
@@ -667,8 +704,18 @@ export async function regeneratePlaybookSection(args: {
 }): Promise<SectionRegenResult> {
   const { client, answers, currentPlaybook, section, feedback } = args;
   const turns = answers.questions ?? [];
+  const companyName = answers.company_name ?? client.name;
+  const contactName = answers.contact_name ?? "(unknown)";
+
+  console.log("[regeneratePlaybookSection] start", {
+    section,
+    feedback_chars: feedback.length,
+    has_current_section: currentPlaybook[section] != null,
+    company: companyName,
+  });
 
   if (isAnthropicKeyMissing()) {
+    console.warn("[regeneratePlaybookSection] anthropic key missing — returning prior content");
     return {
       section,
       content: currentPlaybook[section],
@@ -676,21 +723,25 @@ export async function regeneratePlaybookSection(args: {
     };
   }
 
-  const system = `You are a senior B2B sales strategist AND a senior B2B copywriter who specializes in the contact's industry. The contact has given specific feedback on ONE section of their generated playbook. Rewrite ONLY that section to address their feedback while keeping it consistent with the rest of the playbook (which you also have for context).
+  const system = `You are a top-tier B2B sales consultant AND a senior B2B copywriter who specializes in the contact's industry. The contact has given specific feedback on ONE section of the generated content. Rewrite ONLY that section to address their feedback. The rewrite must be VISIBLY DIFFERENT from the prior section — that's the whole point of feedback. Keep cross-section consistency with the rest (which you have for context).
 
-Hard rules apply (same as the full-playbook generator):
-- Anchor every field on a specific quote or fact from the transcript.
-- No invented facts. No template language. No "I hope this finds you well", "circling back", "synergy", etc.
-- Use the contact's own vocabulary and stated differentiators verbatim where possible.
-- For sequences/email content: write like a senior copywriter who specializes in the client's industry.
-- For sales_process conditions: reflect any explicit rules the contact stated.
+CORE PRINCIPLE — INTERPRET, ELEVATE, PROFESSIONALISE
+The contact's feedback is raw. Your job is to translate it into polished, sales-grade output. Don't paste the feedback back as text — apply it as a direction. The output should feel like the work of a senior strategist.
+
+Hard rules:
+- ICP must list specific industries by their proper names (Food & Beverage, Hospitality, Independent Retail, Healthcare Services, Professional Services, etc.) and specific job titles (General Manager, Operations Manager, Owner, Area Manager, Marketing Manager). Infer adjacent industries and titles that fit but the contact didn't explicitly mention.
+- strategy.value_proposition is rewritten in confident sales-grade prose, NOT a quote. key_messages are sharp 1-line bullets a rep could land. proof_points are concrete or empty. objection_responses are confident rebuttals.
+- voice_tone is INTERPRETED and CODIFIED, not copied.
+- sequences read like a senior copywriter who specialises in the client's industry. BLOCKED phrases (NEVER use): "I hope this finds you well", "circling back", "just touching base", "wanted to reach out", "synergy", "leverage", "thought I'd check in", "bumping this up". Use {{contact_name}} and {{company_name}} placeholders.
+- sales_process descriptions are short polished sentences. conditions reflect explicit rules the contact stated. Use canonical agent handles: prospect-01, outreach-01, sales-01, handover-01, human.
 
 You ALWAYS return a single JSON object with exactly two keys: "section" (the section id, must equal the requested section) and "content" (the new value for that section, in the exact schema requested). No markdown, no commentary.`;
 
   const userBlock = `CLIENT
-Company: ${client.name}
+Company: ${companyName}
+Primary contact: ${contactName}
 
-INTERVIEW TRANSCRIPT (for full context — anchor changes on what they actually said)
+INTERVIEW TRANSCRIPT (for context — anchor changes on what they actually said)
 ${turns
     .map((t, i) => `${i + 1}. [${t.topic}] Q: ${t.question}\n   A: ${t.answer}`)
     .join("\n\n")}
@@ -703,7 +754,7 @@ ${JSON.stringify(currentPlaybook, null, 2)}
 CONTACT'S FEEDBACK ON "${SECTION_LABELS[section]}"
 ${feedback}
 
-REQUIRED: rewrite ONLY the "${section}" section. Address the feedback specifically. Keep the new section consistent with the rest of the playbook above. Use the schema:
+REQUIRED: rewrite ONLY the "${section}" section to address the feedback. The new section MUST be visibly different from the prior section. Apply the feedback as a direction — don't paste it as text. Use the schema:
 
 ${SECTION_SCHEMA_HINTS[section]}
 
@@ -718,16 +769,27 @@ Return ONLY this JSON shape (no markdown, no commentary):
       messages: [{ role: "user", content: userBlock }],
     });
     const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+    console.log("[regeneratePlaybookSection] claude raw response chars:", text.length);
     const parsed = parseJsonResponse<{ section?: string; content?: unknown }>(text);
     if (parsed.section !== section || parsed.content == null) {
+      console.error("[regeneratePlaybookSection] invalid shape", {
+        returned_section: parsed.section,
+        expected_section: section,
+        has_content: parsed.content != null,
+      });
       return {
         section,
         content: currentPlaybook[section],
         warning: "Claude returned an invalid shape — section unchanged.",
       };
     }
+    console.log("[regeneratePlaybookSection] success", {
+      section,
+      content_chars: JSON.stringify(parsed.content).length,
+    });
     return { section, content: parsed.content };
   } catch (err) {
+    console.error("[regeneratePlaybookSection] error", err);
     return {
       section,
       content: currentPlaybook[section],

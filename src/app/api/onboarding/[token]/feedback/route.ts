@@ -75,6 +75,11 @@ export async function POST(
       );
     }
     const section = parsed.data.section;
+    console.log("[feedback API] section feedback received", {
+      session_id: session.id,
+      section,
+      feedback_chars: parsed.data.feedback.length,
+    });
     const result = await regeneratePlaybookSection({
       client: { name: clientName },
       answers: session.answers ?? {},
@@ -101,7 +106,7 @@ export async function POST(
       },
     };
 
-    await supabase
+    const { error: updateErr } = await supabase
       .from("onboarding_sessions")
       .update({
         generated_playbook: nextPlaybook,
@@ -109,6 +114,16 @@ export async function POST(
         answers: nextAnswers,
       })
       .eq("id", session.id);
+
+    if (updateErr) {
+      console.error("[feedback API] DB update failed", updateErr);
+      return NextResponse.json({ ok: false, error: updateErr.message }, { status: 500 });
+    }
+    console.log("[feedback API] section regen complete", {
+      section,
+      content_changed: JSON.stringify(priorPlaybook[section]) !== JSON.stringify(result.content),
+      round: nextRounds.length,
+    });
 
     await logEvent({
       service: true,

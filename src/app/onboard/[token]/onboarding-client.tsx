@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert } from "@/components/ui/alert";
 import {
@@ -30,6 +31,7 @@ import type {
 // ─────────────────────────────────────────────────────────────────────────
 
 type Stage =
+  | { kind: "intro" }
   | { kind: "welcome" }
   | { kind: "interview" }
   | { kind: "generating" }
@@ -37,12 +39,14 @@ type Stage =
   | { kind: "submitting" }
   | { kind: "approved" };
 
+// Client-facing labels — no internal jargon. Section ids stay the same
+// for API + DB consistency.
 const SECTIONS: Array<{ id: OnboardingSectionId; label: string }> = [
-  { id: "icp", label: "Ideal Customer Profile" },
-  { id: "strategy", label: "Strategy & Key Messaging" },
-  { id: "voice_tone", label: "Voice & Tone" },
-  { id: "sequences", label: "Email Sequence" },
-  { id: "sales_process", label: "Sales Process" },
+  { id: "icp", label: "Your ideal customer" },
+  { id: "strategy", label: "Your sales approach" },
+  { id: "voice_tone", label: "How you communicate" },
+  { id: "sequences", label: "Your outreach emails" },
+  { id: "sales_process", label: "Your sales process" },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -60,6 +64,16 @@ export function OnboardingClient(props: {
   initialSectionApprovals: Partial<Record<OnboardingSectionId, boolean>>;
   coreTopics: CoreTopic[];
 }) {
+  // Contact-supplied display state. The intro slide writes both of these.
+  // Until then the welcome screen / Claude prompts use placeholders (the
+  // client-facing UI never shows the internal clients.name).
+  const [contactName, setContactName] = useState<string>(
+    props.initialAnswers.contact_name ?? "",
+  );
+  const [companyName, setCompanyName] = useState<string>(
+    props.initialAnswers.company_name ?? "",
+  );
+
   // Approval state — hydrated from server
   const [sectionApprovals, setSectionApprovals] = useState<
     Partial<Record<OnboardingSectionId, boolean>>
@@ -68,6 +82,7 @@ export function OnboardingClient(props: {
   // Pick initial stage:
   //  - approved → done screen
   //  - playbook_generated → resume on first un-approved section
+  //  - no contact_name → intro (collect first name + company)
   //  - has answers → interview
   //  - else → welcome
   const initialStage: Stage = (() => {
@@ -77,6 +92,9 @@ export function OnboardingClient(props: {
         (s) => props.initialSectionApprovals[s.id] !== true,
       );
       return { kind: "review", sectionIdx: firstUnapproved < 0 ? 0 : firstUnapproved };
+    }
+    if (!props.initialAnswers.contact_name || !props.initialAnswers.company_name) {
+      return { kind: "intro" };
     }
     if ((props.initialAnswers.questions ?? []).length === 0) return { kind: "welcome" };
     return { kind: "interview" };
@@ -108,23 +126,127 @@ export function OnboardingClient(props: {
     setSlideKey((k) => k + 1);
   }
 
+  // The display name shown anywhere on the public page. Falls back to the
+  // server-supplied placeholder ONLY before the contact has done the
+  // intro slide; after that the contact-supplied value wins everywhere.
+  const displayCompanyName = (companyName || props.clientName).trim();
+
   // ───────────────────────────────────────────────────────────────────
-  // Welcome
+  // Intro — collect first name + company name (always first slide)
+  // ───────────────────────────────────────────────────────────────────
+  if (stage.kind === "intro") {
+    function submitIntro() {
+      const fn = contactName.trim();
+      const cn = companyName.trim();
+      if (!fn || !cn) {
+        setError("Both fields are required.");
+        return;
+      }
+      setError(null);
+      start(async () => {
+        const res = await fetch(`/api/onboarding/${props.token}/intro`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ contact_name: fn, company_name: cn }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          ok: boolean;
+          error?: string;
+          contact_name?: string;
+          company_name?: string;
+        } | null;
+        if (!json?.ok) {
+          setError(json?.error ?? "Couldn't save your details.");
+          return;
+        }
+        if (json.contact_name) setContactName(json.contact_name);
+        if (json.company_name) setCompanyName(json.company_name);
+        setStage({ kind: "welcome" });
+        bumpSlide();
+      });
+    }
+    return (
+      <Shell>
+        <SlideContainer slideKey={slideKey}>
+          <div className="mx-auto flex w-full max-w-xl flex-col gap-8">
+            <Sparkles className="h-8 w-8 text-primary" />
+            <h1 className="text-4xl font-semibold tracking-tight text-foreground sm:text-5xl">
+              Let&apos;s get started.
+            </h1>
+            <p className="text-base text-muted-foreground">
+              First — who are you, and what should we call your company?
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  Your first name
+                </label>
+                <Input
+                  value={contactName}
+                  onChange={(e) => setContactName(e.target.value)}
+                  placeholder="Sam"
+                  autoFocus
+                  className="h-12 text-base"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      submitIntro();
+                    }
+                  }}
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  Your company name
+                </label>
+                <Input
+                  value={companyName}
+                  onChange={(e) => setCompanyName(e.target.value)}
+                  placeholder="Acme Hospitality"
+                  className="h-12 text-base"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      submitIntro();
+                    }
+                  }}
+                />
+              </div>
+            </div>
+            {error && <Alert variant="destructive">{error}</Alert>}
+            <div className="flex justify-end">
+              <Button
+                size="lg"
+                onClick={submitIntro}
+                disabled={pending || !contactName.trim() || !companyName.trim()}
+              >
+                {pending ? "Saving…" : "Continue"} <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        </SlideContainer>
+      </Shell>
+    );
+  }
+
+  // ───────────────────────────────────────────────────────────────────
+  // Welcome — short, premium, no fixed-step disclosure
   // ───────────────────────────────────────────────────────────────────
   if (stage.kind === "welcome") {
+    const greetName = contactName.trim();
     return (
       <Shell>
         <SlideContainer slideKey={slideKey}>
           <div className="mx-auto flex w-full max-w-2xl flex-col items-start gap-8">
             <Sparkles className="h-8 w-8 text-primary" />
             <h1 className="text-5xl font-semibold tracking-tight text-foreground">
-              Welcome, {props.clientName}.
+              {greetName ? `Welcome, ${greetName}.` : "Welcome."}
             </h1>
             <p className="text-lg text-muted-foreground">
-              I&apos;ll ask you 8 quick questions about your business and how
-              you sell — should take about 15 minutes. Then I&apos;ll draft your
-              full sales playbook and you can review it section by section
-              before anything goes live.
+              Next up: a short conversation about {displayCompanyName} — how
+              you sell, who you sell to, and how you talk. Take your time on
+              each answer. When we&apos;re done, I&apos;ll put together the
+              full setup and walk you through it before anything goes live.
             </p>
             <Button
               size="lg"
@@ -134,7 +256,7 @@ export function OnboardingClient(props: {
               }}
               className="mt-2"
             >
-              Start the interview <ArrowRight className="ml-2 h-4 w-4" />
+              Let&apos;s begin <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </div>
         </SlideContainer>
@@ -183,7 +305,7 @@ export function OnboardingClient(props: {
     function imDone() {
       if (
         !confirm(
-          "Done with the interview? I'll draft your full playbook now — takes ~30 seconds.",
+          "Done? I'll put your sales setup together now — takes about 30 seconds.",
         )
       )
         return;
@@ -202,7 +324,7 @@ export function OnboardingClient(props: {
           playbook?: GeneratedPlaybookDraft;
         } | null;
         if (!json?.ok || !json.playbook) {
-          setError(json?.error ?? "Failed to generate playbook.");
+          setError(json?.error ?? "Couldn't put it together — please try again.");
           setStage({ kind: "interview" });
           return;
         }
@@ -212,19 +334,10 @@ export function OnboardingClient(props: {
       });
     }
 
-    const total = props.coreTopics.length;
-    // Each answered turn moves us forward; the current question fills slot
-    // (turnCount + 1).
-    const currentSlot = Math.min(turnCount + 1, total);
-
     return (
       <Shell>
-        <ProgressDots current={currentSlot} total={total} />
         <SlideContainer slideKey={slideKey}>
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
-            <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-              Question {currentSlot} of {total}
-            </p>
             <h2 className="text-3xl font-semibold leading-tight tracking-tight text-foreground sm:text-4xl">
               {currentQ?.question ?? "…"}
             </h2>
@@ -285,11 +398,11 @@ export function OnboardingClient(props: {
           <div className="mx-auto flex max-w-xl flex-col items-center gap-6 text-center">
             <RefreshCw className="h-10 w-10 animate-spin text-primary" />
             <h2 className="text-2xl font-semibold tracking-tight">
-              Drafting your sales playbook…
+              Putting your sales setup together…
             </h2>
             <p className="text-sm text-muted-foreground">
-              Pulling everything you said into a complete playbook custom-built
-              for {props.clientName}. Usually 20-40 seconds.
+              Pulling everything you said into a complete setup custom-built
+              for {displayCompanyName}. Usually 20-40 seconds.
             </p>
           </div>
         </SlideContainer>
@@ -306,7 +419,7 @@ export function OnboardingClient(props: {
         <SlideContainer slideKey={slideKey}>
           <div className="mx-auto flex max-w-xl flex-col items-center gap-6 text-center">
             <RefreshCw className="h-10 w-10 animate-spin text-primary" />
-            <h2 className="text-2xl font-semibold tracking-tight">Submitting to Aylek…</h2>
+            <h2 className="text-2xl font-semibold tracking-tight">Sending it through…</h2>
             <p className="text-sm text-muted-foreground">Almost there.</p>
           </div>
         </SlideContainer>
@@ -321,8 +434,8 @@ export function OnboardingClient(props: {
             <CheckCircle2 className="h-12 w-12 text-primary" />
             <h2 className="text-3xl font-semibold tracking-tight">Approved — thanks!</h2>
             <p className="text-base text-muted-foreground">
-              Your playbook is with Aylek for final sign-off. We&apos;ll email
-              you when your sales agents go live.
+              Your setup is with the Aylek team for a final review. We&apos;ll
+              email you the moment everything goes live.
             </p>
           </div>
         </SlideContainer>
@@ -349,6 +462,10 @@ export function OnboardingClient(props: {
       }
       setError(null);
       setSectionRegenerating(section.id);
+      console.log("[onboarding] submitting section feedback", {
+        section: section.id,
+        feedback_chars: fb.length,
+      });
       start(async () => {
         const res = await fetch(`/api/onboarding/${props.token}/feedback`, {
           method: "POST",
@@ -363,12 +480,22 @@ export function OnboardingClient(props: {
           round?: number;
         } | null;
         setSectionRegenerating(null);
+        console.log("[onboarding] section feedback response", json);
         if (!json?.ok || !json.section || json.content == null) {
-          setError(json?.error ?? "Failed to revise the section.");
+          setError(json?.error ?? "Couldn't revise the section. Please try again.");
           return;
         }
-        // Replace the section content + reset the approval flag locally
-        setPlaybook((pb) => (pb ? { ...pb, [section.id]: json.content } as GeneratedPlaybookDraft : pb));
+        // Replace the section content + reset the approval flag locally.
+        // Bump the slide key so the section card visibly fades back in
+        // with the new content — a subtle but important UX signal.
+        setPlaybook((pb) => {
+          if (!pb) return pb;
+          const next = { ...pb, [section.id]: json.content } as GeneratedPlaybookDraft;
+          console.log("[onboarding] playbook updated for section", section.id, {
+            content_changed: JSON.stringify(pb[section.id]) !== JSON.stringify(json.content),
+          });
+          return next;
+        });
         setSectionApprovals((a) => ({ ...a, [section.id]: false }));
         setFeedbackRounds((r) => [
           ...r,
@@ -382,6 +509,7 @@ export function OnboardingClient(props: {
         ]);
         setFeedbackText("");
         setFeedbackSection(null);
+        bumpSlide();
       });
     }
 
@@ -425,7 +553,7 @@ export function OnboardingClient(props: {
           error?: string;
         } | null;
         if (!json?.ok) {
-          setError(json?.error ?? "Failed to submit playbook.");
+          setError(json?.error ?? "Couldn't send it through — please try again.");
           // Bounce back to the last section so they can retry
           setStage({ kind: "review", sectionIdx: SECTIONS.length - 1 });
           return;
@@ -452,7 +580,7 @@ export function OnboardingClient(props: {
                 {section.label}
               </h2>
               <p className="mt-2 text-sm text-muted-foreground">
-                {sectionIntro(section.id, props.clientName)}
+                {sectionIntro(section.id, displayCompanyName)}
               </p>
             </div>
 
@@ -535,8 +663,8 @@ export function OnboardingClient(props: {
                     <CheckCircle2 className="mr-1.5 h-4 w-4" />
                     {isLast
                       ? pending
-                        ? "Submitting…"
-                        : "Approve & submit playbook"
+                        ? "Sending it through…"
+                        : "Approve & finish setup"
                       : pending
                         ? "Approving…"
                         : "Approve & continue"}
@@ -676,18 +804,18 @@ function SectionProgress({
 // Per-section views
 // ─────────────────────────────────────────────────────────────────────────
 
-function sectionIntro(s: OnboardingSectionId, clientName: string): string {
+function sectionIntro(s: OnboardingSectionId, companyName: string): string {
   switch (s) {
     case "icp":
-      return `The exact customer profile your agents will source against. Drawn from how you described ${clientName}'s best-fit buyers.`;
+      return `The customers we'll go after for ${companyName} — industries, company types, and the people we'll reach out to inside them.`;
     case "strategy":
       return `Your value proposition, the messages that land, and how to handle the objections you actually hear.`;
     case "voice_tone":
       return `How your team writes — what to do, what to avoid, and how it should feel to read.`;
     case "sequences":
-      return `The 3-step outbound email sequence your agents will run. Written in your voice for your buyers.`;
+      return `The 3-step outbound email sequence we'll send for ${companyName}, written in your voice for your buyers.`;
     case "sales_process":
-      return `The full lifecycle — who owns each stage and the conditions that gate them.`;
+      return `The end-to-end path from a new lead to a closed deal, with any rules you want us to follow at each stage.`;
   }
 }
 
@@ -839,22 +967,20 @@ function SalesProcessView({
   if (!stages || stages.length === 0) {
     return <p className="text-sm text-muted-foreground">No process yet.</p>;
   }
+  // Internal agent handles (prospect-01, outreach-01, etc.) are intentionally
+  // NOT rendered here — agent assignment is internal Aylek information.
+  // The contact sees stage names + descriptions + any conditions only.
   return (
     <ul className="space-y-3 text-sm">
       {stages.map((s, i) => (
         <li key={s.id} className="rounded-lg border border-border/60 bg-background/40 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <p className="font-medium">
-              {i + 1}. {s.name}
-            </p>
-            <span className="rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-              {s.agent}
-            </span>
-          </div>
+          <p className="font-medium">
+            {i + 1}. {s.name}
+          </p>
           <p className="mt-1 text-xs text-muted-foreground">{s.description}</p>
           {s.condition && (
-            <p className="mt-2 rounded-md bg-primary/10 px-2 py-1 text-xs text-primary-foreground/90">
-              Condition: {s.condition}
+            <p className="mt-2 rounded-md bg-primary/10 px-2 py-1 text-xs text-primary">
+              Rule: {s.condition}
             </p>
           )}
         </li>
