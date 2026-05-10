@@ -231,7 +231,7 @@ export default async function LeadsPage({
                           leadStage={l.stage}
                           currentStageId={inferredStageId}
                           stages={stages}
-                          inferredFromLeadStage={l.process_stage_id == null}
+                          pendingApproval={l.approval_status === "pending_approval"}
                         />
                       </TableCell>
                       <TableCell>

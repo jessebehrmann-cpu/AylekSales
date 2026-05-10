@@ -33,6 +33,8 @@ const env = Object.fromEntries(
 
 const URL = env.NEXT_PUBLIC_SUPABASE_URL;
 const SR = env.SUPABASE_SERVICE_ROLE_KEY;
+const ANTHROPIC_KEY = env.ANTHROPIC_API_KEY;
+const ANTHROPIC_MODEL = env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
 if (!URL || !SR) {
   console.error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   process.exit(1);
@@ -58,10 +60,123 @@ async function rest(path, init = {}) {
 
 const SEND_PROPOSAL_STAGE_ID = "send_proposal";
 
+/**
+ * Direct Anthropic call (no SDK — keep this script dep-free). Returns
+ * {subject, body, warning?}. Falls back to a playbook-shaped draft when
+ * the API key is missing or the call fails so the row is always real,
+ * editable text rather than a placeholder.
+ */
+async function draftProposal(playbook, lead) {
+  const firstName = (lead.contact_name ?? "").split(" ")[0] || "there";
+  const fallback = (warning) => {
+    const strategy = playbook?.strategy ?? {};
+    const team = playbook?.team_members ?? [];
+    const sender = team[0]?.name ?? "the team";
+    const valueProp =
+      strategy.value_proposition ??
+      `We help teams like ${lead.company_name} move faster on what matters most.`;
+    const keyMessages = (strategy.key_messages ?? []).slice(0, 2);
+    const lines = [
+      `Hi ${firstName},`,
+      "",
+      valueProp,
+    ];
+    if (keyMessages.length > 0) {
+      lines.push("");
+      lines.push("A few specifics that map to teams in your space:");
+      for (const m of keyMessages) lines.push(`- ${m}`);
+    }
+    lines.push("");
+    lines.push(
+      `Would a 20-minute call next week be useful to walk through what this could look like for ${lead.company_name}?`,
+    );
+    lines.push("");
+    lines.push(`Thanks,`);
+    lines.push(sender);
+    return {
+      subject: `${lead.company_name}: a quick proposal`,
+      body: lines.join("\n"),
+      warning,
+    };
+  };
+
+  if (!ANTHROPIC_KEY || !ANTHROPIC_KEY.startsWith("sk-ant-")) {
+    return fallback("Add your Anthropic API key to enable AI generation.");
+  }
+
+  const strategy = playbook?.strategy ?? {};
+  const voice = playbook?.voice_tone ?? {};
+  const team = playbook?.team_members ?? [];
+  const senderName = team[0]?.name ?? "the team";
+
+  const system = `You write outbound B2B proposal emails on behalf of a client team. Anchor every line on the supplied STRATEGY and VOICE & TONE. Reference the lead's company by name. Open with the contact's first name. Body is 4-7 short sentences max with one concrete value proposition and one explicit next-step CTA (typically a 20-30 minute call). No price talk. No marketing fluff. Sign off with the team's voice.`;
+  const prompt = `Draft a proposal email to ${lead.company_name}.
+
+LEAD
+- Contact: ${lead.contact_name ?? "(unknown)"}
+- Title: ${lead.title ?? "(unknown)"}
+- Company: ${lead.company_name}
+- Industry: ${lead.industry ?? "(unknown)"}
+
+CONTEXT
+This lead reached the Send Proposal stage without prior meeting notes. Treat
+this as a first-touch proposal anchored on the playbook strategy + voice &
+tone, not a follow-up to a specific conversation. Do not invent meeting
+context.
+
+STRATEGY (value prop, key messages, proof points)
+${JSON.stringify(strategy, null, 2)}
+
+VOICE & TONE
+${JSON.stringify(voice, null, 2)}
+
+TEAM (use first member as the sender unless voice says otherwise)
+${JSON.stringify(team.slice(0, 3), null, 2)}
+
+Return ONLY valid JSON with this shape, no markdown, no commentary:
+{"subject": "...", "body": "..."}
+
+Subject must be under 70 characters and reference ${lead.company_name} or
+the value proposition. Body opens with "${firstName}" (case per voice
+preference), runs 4-7 sentences, ends with the next-step CTA, and signs off
+with ${senderName}'s name.`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1500,
+        system,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      return fallback(`Claude API ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    }
+    const json = await res.json();
+    const text = json?.content?.[0]?.type === "text" ? json.content[0].text : "";
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const raw = (fenced ? fenced[1] : text).trim();
+    const parsed = JSON.parse(raw);
+    if (!parsed.subject || !parsed.body) {
+      return fallback("AI returned an invalid shape — playbook fallback used.");
+    }
+    return { subject: String(parsed.subject).slice(0, 200), body: String(parsed.body) };
+  } catch (err) {
+    return fallback(err instanceof Error ? err.message : String(err));
+  }
+}
+
 // ─── 1. Load every lead with a process_stage_id + their playbook stages ──
 console.log("[1/3] Loading leads + approved playbooks");
 const leads = await rest(
-  `leads?select=id,client_id,process_stage_id,company_name,contact_name&process_stage_id=not.is.null`,
+  `leads?select=id,client_id,process_stage_id,company_name,contact_name,title,industry&process_stage_id=not.is.null`,
 );
 console.log(`    ${leads.length} leads on a process stage`);
 
@@ -70,10 +185,10 @@ const playbooksByClient = new Map();
 if (distinctClients.length > 0) {
   const list = distinctClients.map((id) => `"${id}"`).join(",");
   const pbs = await rest(
-    `playbooks?client_id=in.(${list})&status=eq.approved&select=id,client_id,sales_process`,
+    `playbooks?client_id=in.(${list})&status=eq.approved&select=*`,
   );
   for (const pb of pbs) {
-    playbooksByClient.set(pb.client_id, { id: pb.id, stages: pb.sales_process ?? [] });
+    playbooksByClient.set(pb.client_id, { id: pb.id, stages: pb.sales_process ?? [], full: pb });
   }
 }
 console.log(`    ${playbooksByClient.size} approved playbooks loaded`);
@@ -183,8 +298,8 @@ for (const lead of leads) {
 
   if (stage.id === SEND_PROPOSAL_STAGE_ID) {
     if (!proposalReviewByLead.has(lead.id)) {
-      const firstName = (lead.contact_name ?? "").split(" ")[0] || "there";
-      const body = `Hi ${firstName},\n\n[Draft your proposal here. Lead reached the Send Proposal stage but no meeting-notes context was supplied — write the proposal manually before sending.]\n\nThanks,\nAylek Sales`;
+      console.log(`    drafting proposal for ${lead.company_name}…`);
+      const draft = await draftProposal(pb.full, lead);
       const created = await rest(`approvals`, {
         method: "POST",
         body: JSON.stringify({
@@ -192,15 +307,15 @@ for (const lead of leads) {
           type: "proposal_review",
           status: "pending",
           title: `${lead.company_name}: review proposal draft`,
-          summary: `Lead reached Send Proposal — draft a proposal and send.`,
+          summary: `Lead reached Send Proposal — Claude drafted a proposal from the playbook. Review + send.`,
           payload: {
             lead_id: lead.id,
             meeting_note_id: null,
-            drafted_subject: `Proposal for ${lead.company_name}`,
-            drafted_body: body,
+            drafted_subject: draft.subject,
+            drafted_body: draft.body,
             outcome: null,
             source: "auto_on_send_proposal",
-            ai_warning: null,
+            ai_warning: draft.warning ?? null,
           },
           related_playbook_id: pb.id,
         }),

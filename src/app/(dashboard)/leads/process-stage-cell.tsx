@@ -6,17 +6,22 @@ import { colorStage, type StageColor } from "@/lib/playbook-defaults";
  * matching the timeline colour scheme. Stage advancement is fully automatic
  * (agents complete their tasks, or HOS marks human stages complete from the
  * lead detail page) — the leads list never lets you move a lead by hand.
+ *
+ * The dashed border indicates a lead that's still in the approvals queue
+ * (approval_status = pending_approval) — its stage isn't a settled fact
+ * yet, so it reads as provisional. Once HOS approves the parent
+ * lead_list batch, the border becomes solid.
  */
 export function ProcessStageCell({
   leadStage,
   currentStageId,
   stages,
-  inferredFromLeadStage,
+  pendingApproval,
 }: {
   leadStage: LeadStage;
   currentStageId: string | null;
   stages: SalesProcessStage[];
-  inferredFromLeadStage: boolean;
+  pendingApproval: boolean;
 }) {
   if (stages.length === 0) {
     return <span className="text-xs text-muted-foreground">—</span>;
@@ -28,8 +33,8 @@ export function ProcessStageCell({
 
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${pillColour(colour)} ${inferredFromLeadStage ? "border-dashed" : ""}`}
-      title={inferredFromLeadStage ? "Inferred from lead stage" : stage?.description ?? stage?.name ?? ""}
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${pillColour(colour)} ${pendingApproval ? "border-dashed" : ""}`}
+      title={pendingApproval ? "Awaiting HOS approval — provisional stage" : stage?.description ?? stage?.name ?? ""}
     >
       {stage?.name ?? "(unset)"}
     </span>

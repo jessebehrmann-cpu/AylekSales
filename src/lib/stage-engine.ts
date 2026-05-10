@@ -19,6 +19,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isHumanStage } from "@/lib/playbook-defaults";
 import { logEvent } from "@/lib/events";
+import { draftProposalFromPlaybook } from "@/lib/proposal-drafter";
 import type {
   Database,
   HumanStageTaskPayload,
@@ -97,16 +98,17 @@ export async function transitionLeadToStage(
 
   let stages: SalesProcessStage[] = [];
   let playbookId: string | null = null;
+  let playbook: Playbook | null = null;
   if (lead.client_id) {
     const { data: pbRow } = await supabase
       .from("playbooks")
-      .select("id, sales_process")
+      .select("*")
       .eq("client_id", lead.client_id)
       .eq("status", "approved")
       .maybeSingle();
-    const pb = pbRow as Pick<Playbook, "id" | "sales_process"> | null;
-    stages = (pb?.sales_process ?? []) as SalesProcessStage[];
-    playbookId = pb?.id ?? null;
+    playbook = (pbRow as Playbook | null) ?? null;
+    stages = (playbook?.sales_process ?? []) as SalesProcessStage[];
+    playbookId = playbook?.id ?? null;
   }
 
   const toStage = stages.find((s) => s.id === toStageId) ?? null;
@@ -167,6 +169,7 @@ export async function transitionLeadToStage(
   } else if (toStage.id === SEND_PROPOSAL_STAGE_ID) {
     const r = await ensureProposalReview(supabase, {
       lead,
+      playbook,
       playbookId,
       userId: opts.userId,
       proposalContext: opts.proposalContext,
@@ -354,13 +357,19 @@ async function ensureHumanStageTask(
 async function ensureProposalReview(
   supabase: Supa,
   args: {
-    lead: { id: string; client_id: string | null; company_name: string; contact_name: string | null };
+    lead: {
+      id: string;
+      client_id: string | null;
+      company_name: string;
+      contact_name: string | null;
+    };
+    playbook: Playbook | null;
     playbookId: string | null;
     userId?: string | null;
     proposalContext?: ProposalDraftContext;
   },
 ): Promise<{ ok: true; approvalId: string | null } | TransitionFailure> {
-  const { lead, playbookId, userId, proposalContext } = args;
+  const { lead, playbook, playbookId, userId, proposalContext } = args;
   if (!lead.client_id) return { ok: true, approvalId: null };
 
   // Dedup per lead — never two open proposal_reviews for the same lead.
@@ -375,25 +384,41 @@ async function ensureProposalReview(
     .maybeSingle();
   if (existing) return { ok: true, approvalId: (existing as { id: string }).id };
 
-  const draft: ProposalReviewPayload = proposalContext
-    ? {
-        lead_id: lead.id,
-        meeting_note_id: proposalContext.meeting_note_id ?? null,
-        drafted_subject: proposalContext.drafted_subject,
-        drafted_body: proposalContext.drafted_body,
-        outcome: proposalContext.outcome ?? null,
-        source: proposalContext.source,
-        ai_warning: proposalContext.ai_warning ?? null,
-      }
-    : {
-        lead_id: lead.id,
-        meeting_note_id: null,
-        drafted_subject: `Proposal for ${lead.company_name}`,
-        drafted_body: `Hi ${lead.contact_name?.split(" ")[0] ?? "there"},\n\n[Draft your proposal here. Lead reached the Send Proposal stage but no meeting-notes context was supplied — write the proposal manually before sending.]\n\nThanks,\nAylek Sales`,
-        outcome: null,
-        source: "auto_on_send_proposal",
-        ai_warning: null,
-      };
+  let draft: ProposalReviewPayload;
+  if (proposalContext) {
+    draft = {
+      lead_id: lead.id,
+      meeting_note_id: proposalContext.meeting_note_id ?? null,
+      drafted_subject: proposalContext.drafted_subject,
+      drafted_body: proposalContext.drafted_body,
+      outcome: proposalContext.outcome ?? null,
+      source: proposalContext.source,
+      ai_warning: proposalContext.ai_warning ?? null,
+    };
+  } else {
+    // No meeting-notes context — ask Claude to draft a real proposal from
+    // the playbook strategy + voice & tone. Drafter falls back gracefully
+    // when Claude is unavailable.
+    const { lead: leadRow } = await fetchLeadForDrafter(supabase, lead.id);
+    const aiDraft = await draftProposalFromPlaybook({
+      playbook,
+      lead: {
+        company_name: lead.company_name,
+        contact_name: lead.contact_name,
+        title: leadRow?.title ?? null,
+        industry: leadRow?.industry ?? null,
+      },
+    });
+    draft = {
+      lead_id: lead.id,
+      meeting_note_id: null,
+      drafted_subject: aiDraft.subject,
+      drafted_body: aiDraft.body,
+      outcome: null,
+      source: "auto_on_send_proposal",
+      ai_warning: aiDraft.warning ?? null,
+    };
+  }
 
   const { data: created, error } = await supabase
     .from("approvals")
@@ -404,7 +429,7 @@ async function ensureProposalReview(
       title: `${lead.company_name}: review proposal draft`,
       summary: proposalContext
         ? `Post-meeting follow-up draft. Review + send.`
-        : `Lead reached Send Proposal — draft a proposal and send.`,
+        : `Lead reached Send Proposal — Claude drafted a proposal from the playbook. Review + send.`,
       payload: draft as unknown as Record<string, unknown>,
       related_playbook_id: playbookId,
       created_by: userId ?? null,
@@ -415,4 +440,18 @@ async function ensureProposalReview(
     return { ok: false, error: error?.message ?? "Failed to create proposal_review" };
   }
   return { ok: true, approvalId: (created as { id: string }).id };
+}
+
+async function fetchLeadForDrafter(
+  supabase: Supa,
+  leadId: string,
+): Promise<{ lead: { title: string | null; industry: string | null } | null }> {
+  const { data } = await supabase
+    .from("leads")
+    .select("title, industry")
+    .eq("id", leadId)
+    .maybeSingle();
+  return {
+    lead: (data as { title: string | null; industry: string | null } | null) ?? null,
+  };
 }
