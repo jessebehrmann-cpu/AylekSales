@@ -82,8 +82,14 @@ Open the Supabase SQL editor for the production project and run, in order:
 3. `supabase/migrations/0003_playbook_expansion.sql`
 4. `supabase/migrations/0004_sales_process.sql`
 5. `supabase/migrations/0005_lead_process_stage.sql`
+6. `supabase/migrations/0006_meeting_notes.sql`
+7. `supabase/migrations/0007_approval_types.sql`
+8. `supabase/migrations/0008_onboarding_sessions.sql`
 
-(Local dev already has these.)
+Each is idempotent (`create … if not exists`, `drop constraint if exists`,
+etc.) so re-running on a partially-migrated DB is safe. The local dev
+project at `qcbrojmwqxmcmxazojwp.supabase.co` already has all 8 applied;
+only fresh production projects need this step.
 
 ## 5. Crons
 
