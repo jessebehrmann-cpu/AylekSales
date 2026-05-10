@@ -7,6 +7,7 @@ import { requireUser } from "@/lib/auth";
 import { logEvent } from "@/lib/events";
 import { actionError, type ActionResult } from "@/lib/actions";
 import { resend, FROM_EMAIL } from "@/lib/resend";
+import { spawnOnboardingSession } from "@/lib/onboarding-trigger";
 import type {
   Approval,
   LeadListPayload,
@@ -85,6 +86,10 @@ export async function approveApproval(input: unknown): Promise<ActionResult> {
       const r = await applyStrategyChangeApproval(approval, user.auth.id);
       if (!r.ok) return r;
       summaryForLog = { kind: "strategy_change_approved", ...r.summary };
+    } else if (approval.type === "playbook_approval") {
+      const r = await applyPlaybookApproval(approval, user.auth.id);
+      if (!r.ok) return r;
+      summaryForLog = { kind: "playbook_approval_approved", ...r.summary };
     } else {
       return { ok: false, error: `Unknown approval type: ${approval.type}` };
     }
@@ -241,33 +246,38 @@ export async function approveProposalReview(
     let leadIdResolved: string | null = payload.lead_id ?? null;
     let leadEmail: string | null = null;
     let leadClientId: string | null = null;
+    let leadContactName: string | null = null;
     if (leadIdResolved) {
       const { data: leadRow } = await supabase
         .from("leads")
-        .select("id, email, client_id")
+        .select("id, email, client_id, contact_name")
         .eq("id", leadIdResolved)
         .maybeSingle();
-      const lead = leadRow as { id: string; email: string | null; client_id: string | null } | null;
+      const lead = leadRow as
+        | { id: string; email: string | null; client_id: string | null; contact_name: string | null }
+        | null;
       if (!lead) return { ok: false, error: "Lead not found for this approval." };
       leadEmail = lead.email;
       leadClientId = lead.client_id;
+      leadContactName = lead.contact_name;
     } else if (payload.meeting_note_id) {
       const { data: noteRow } = await supabase
         .from("meeting_notes")
-        .select("lead_id, client_id, leads(email)")
+        .select("lead_id, client_id, leads(email, contact_name)")
         .eq("id", payload.meeting_note_id)
         .maybeSingle();
       const note = noteRow as
         | {
             lead_id: string;
             client_id: string | null;
-            leads: { email: string | null } | null;
+            leads: { email: string | null; contact_name: string | null } | null;
           }
         | null;
       if (!note) return { ok: false, error: "Meeting note not found for this approval." };
       leadIdResolved = note.lead_id;
       leadEmail = note.leads?.email ?? null;
       leadClientId = note.client_id;
+      leadContactName = note.leads?.contact_name ?? null;
     } else {
       return { ok: false, error: "Approval has no lead reference." };
     }
@@ -335,8 +345,32 @@ export async function approveProposalReview(
       },
     });
 
+    // After the proposal lands, spawn the client onboarding interview. The
+    // contact gets a private /onboard/[token] link to fill out the playbook
+    // interview. Idempotent: a single in-flight session per (client, lead).
+    if (note.client_id && note.lead_id) {
+      const { data: clientRow } = await supabase
+        .from("clients")
+        .select("name")
+        .eq("id", note.client_id)
+        .maybeSingle();
+      const clientName = (clientRow as { name?: string } | null)?.name ?? "your team";
+      const onboard = await spawnOnboardingSession(supabase, {
+        clientId: note.client_id,
+        leadId: note.lead_id,
+        contactEmail: note.leads.email,
+        contactName: leadContactName,
+        clientName,
+        userId: user.auth.id,
+      });
+      if (!onboard.ok) {
+        console.error("[approvals] onboarding spawn failed", onboard.error);
+      }
+    }
+
     revalidatePath("/approvals");
     revalidatePath(`/leads/${note.lead_id}`);
+    revalidatePath(`/clients/${note.client_id}`);
     revalidatePath("/dashboard");
     return { ok: true, email_id: (emailRow as { id?: string } | null)?.id ?? null };
   } catch (err) {
@@ -688,6 +722,96 @@ async function triggerSendLoopAsync(): Promise<void> {
     .catch((err) => {
       console.warn("[approvals] send-loop trigger failed:", err);
     });
+}
+
+/**
+ * Final HOS sign-off on a client-approved playbook (from the onboarding
+ * interview). Promotes the pending playbook to approved, demotes any prior
+ * approved playbook for the client to draft, and sends a "you're live"
+ * email to the client CEO via Resend.
+ */
+async function applyPlaybookApproval(
+  approval: Approval,
+  userId: string,
+): Promise<ActionResult<{ summary: Record<string, unknown> }>> {
+  const supabase = createClient();
+  if (!approval.related_playbook_id) {
+    return { ok: false, error: "Approval has no playbook reference" };
+  }
+  const { data: pbRow } = await supabase
+    .from("playbooks")
+    .select("*")
+    .eq("id", approval.related_playbook_id)
+    .maybeSingle();
+  if (!pbRow) return { ok: false, error: "Playbook not found" };
+  const playbook = pbRow as Playbook;
+  if (playbook.status !== "pending_approval" && playbook.status !== "draft") {
+    return { ok: false, error: `Playbook is ${playbook.status} — cannot promote` };
+  }
+
+  // Demote any prior approved playbook for the same client.
+  await supabase
+    .from("playbooks")
+    .update({ status: "draft" })
+    .eq("client_id", playbook.client_id)
+    .eq("status", "approved")
+    .neq("id", playbook.id);
+
+  const approvedAt = new Date().toISOString();
+  const { error: pbErr } = await supabase
+    .from("playbooks")
+    .update({ status: "approved", approved_by: userId, approved_at: approvedAt })
+    .eq("id", playbook.id);
+  if (pbErr) return { ok: false, error: pbErr.message };
+
+  // Send the CEO the "you're live" confirmation. Best-effort — we don't
+  // fail the approval if the email errors out.
+  let emailSent = false;
+  let emailWarning: string | null = null;
+  try {
+    const { data: clientRow } = await supabase
+      .from("clients")
+      .select("name, email, owner_name")
+      .eq("id", playbook.client_id)
+      .maybeSingle();
+    const client = clientRow as
+      | { name: string; email: string | null; owner_name: string | null }
+      | null;
+    if (client?.email) {
+      const ownerFirst = (client.owner_name ?? "").split(" ")[0] || "there";
+      const result = await resend.emails.send({
+        from: FROM_EMAIL,
+        to: client.email,
+        subject: `${client.name}: your sales system is live`,
+        text: `Hi ${ownerFirst},
+
+Your playbook just cleared final review — your ${client.name} sales system is now live. From here, the agents will start sourcing leads against your ICP, running the sequences you approved, and surfacing anything that needs your touch in the approval queue.
+
+You'll get a weekly digest. Reply to this email any time something looks off.
+
+Talk soon,
+Aylek Sales`,
+        replyTo: FROM_EMAIL,
+      });
+      if (result.error) throw new Error(result.error.message);
+      emailSent = true;
+    } else {
+      emailWarning = "No CEO email on file — skipped confirmation send.";
+    }
+  } catch (err) {
+    emailWarning = err instanceof Error ? err.message : String(err);
+  }
+
+  return {
+    ok: true,
+    summary: {
+      playbook_id: playbook.id,
+      client_id: playbook.client_id,
+      version: playbook.version,
+      ceo_email_sent: emailSent,
+      ceo_email_warning: emailWarning,
+    },
+  };
 }
 
 async function applyStrategyChangeApproval(

@@ -131,6 +131,7 @@ export async function transitionLeadToStage(
   }
 
   // 3. Log the transition
+  const stageCondition = (toStage.condition ?? "").trim() || null;
   await logEvent({
     service: opts.service,
     event_type: "stage_changed",
@@ -144,29 +145,61 @@ export async function transitionLeadToStage(
       after: toStageId,
       stage_name: toStage.name,
       agent: toStage.agent,
+      condition: stageCondition,
     },
   });
 
-  // 4. Owner-specific side effects
+  // 4. Owner-specific side effects.
+  //    A `condition` on the stage means the action shouldn't fire
+  //    automatically — the engine creates a human_stage_task so HOS reviews
+  //    the rule and decides whether to advance / send / etc. This applies to
+  //    any non-human agent stage that carries a condition (e.g. Send
+  //    Proposal "only if prospect explicitly asks for one").
   let humanTaskId: string | null = null;
   let proposalReviewId: string | null = null;
 
-  if (isHumanStage(toStage.agent)) {
+  const isHuman = isHumanStage(toStage.agent);
+  const conditionGated = !isHuman && !!stageCondition;
+
+  if (isHuman || conditionGated) {
     const r = await ensureHumanStageTask(supabase, {
       lead,
       stage: toStage,
       userId: opts.userId,
+      conditionGated,
     });
     if (!r.ok) return r;
     humanTaskId = r.approvalId;
 
-    // Pause outreach while the lead sits at a human stage.
+    // Pause outreach while the lead sits at a human-gated stage.
     await supabase
       .from("emails")
       .update({ status: "failed" })
       .eq("lead_id", leadId)
       .eq("status", "pending");
-  } else if (toStage.id === SEND_PROPOSAL_STAGE_ID) {
+
+    if (conditionGated) {
+      await logEvent({
+        service: opts.service,
+        event_type: "ai_action",
+        lead_id: leadId,
+        client_id: lead.client_id,
+        user_id: opts.userId ?? null,
+        payload: {
+          kind: "stage_condition_gate",
+          stage_id: toStage.id,
+          stage_name: toStage.name,
+          condition: stageCondition,
+          message: `Stage "${toStage.name}" has a condition — automation paused for HOS review.`,
+        },
+      });
+    }
+  }
+
+  // Send Proposal: drop a proposal_review approval (Claude-drafted) so HOS
+  // has something to send. Skipped when the stage is condition-gated above
+  // (human task already created — proposal can be drafted on Mark Complete).
+  if (!isHuman && !conditionGated && toStage.id === SEND_PROPOSAL_STAGE_ID) {
     const r = await ensureProposalReview(supabase, {
       lead,
       playbook,
@@ -307,9 +340,13 @@ async function ensureHumanStageTask(
     lead: { id: string; client_id: string | null; company_name: string };
     stage: SalesProcessStage;
     userId?: string | null;
+    /** True when the stage is owned by an agent but carries a `condition`
+     *  the engine can't auto-evaluate. The task message reflects the
+     *  condition so HOS can decide whether the rule is met. */
+    conditionGated?: boolean;
   },
 ): Promise<{ ok: true; approvalId: string | null } | TransitionFailure> {
-  const { lead, stage, userId } = args;
+  const { lead, stage, userId, conditionGated } = args;
   if (!lead.client_id) {
     // Approvals require a client_id; orphaned leads silently skip.
     return { ok: true, approvalId: null };
@@ -327,13 +364,24 @@ async function ensureHumanStageTask(
     .maybeSingle();
   if (existing) return { ok: true, approvalId: (existing as { id: string }).id };
 
-  const payload: HumanStageTaskPayload & { lead_id: string } = {
+  const condition = (stage.condition ?? "").trim() || null;
+  const message = conditionGated && condition
+    ? `Lead reached "${stage.name}" — automation paused. Condition on this stage: "${condition}". HOS to confirm the condition is met before advancing.`
+    : `Lead reached "${stage.name}" — automation paused, awaiting human action.${condition ? ` Condition: ${condition}.` : ""}`;
+
+  const payload: HumanStageTaskPayload & { lead_id: string; condition?: string | null; condition_gated?: boolean } = {
     stage_id: stage.id,
     stage_name: stage.name,
     agent: stage.agent,
     lead_id: lead.id,
-    message: `Lead reached "${stage.name}" — automation paused, awaiting human action.`,
+    message,
+    condition,
+    condition_gated: !!conditionGated,
   };
+
+  const summary = conditionGated && condition
+    ? `Stage rule needs HOS judgment: "${condition}". Mark complete to confirm.`
+    : `Lead reached a human-owned stage. Automation paused — HOS to mark the stage complete.${condition ? ` Condition: ${condition}.` : ""}`;
 
   const { data: created, error } = await supabase
     .from("approvals")
@@ -342,7 +390,7 @@ async function ensureHumanStageTask(
       type: "human_stage_task",
       status: "pending",
       title: `${lead.company_name}: ${stage.name}`,
-      summary: `Lead reached a human-owned stage. Automation paused — HOS to mark the stage complete.`,
+      summary,
       payload: payload as unknown as Record<string, unknown>,
       created_by: userId ?? null,
     })

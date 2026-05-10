@@ -28,12 +28,14 @@ import {
   Mail,
   ChevronDown,
   ChevronUp,
+  BookOpen,
 } from "lucide-react";
 import { approveApproval, approveProposalReview, rejectApproval } from "./actions";
 import type {
   Approval,
   HumanStageTaskPayload,
   LeadListPayload,
+  PlaybookApprovalPayload,
   ProposalReviewPayload,
   StrategyChangePayload,
 } from "@/lib/supabase/types";
@@ -77,6 +79,9 @@ export function ApprovalCard({
         )}
         {approval.type === "proposal_review" && (
           <ProposalReviewBody approval={approval} isPending={isPending} />
+        )}
+        {approval.type === "playbook_approval" && (
+          <PlaybookApprovalBody approval={approval} isPending={isPending} />
         )}
 
         {!isPending && approval.decided_at && (
@@ -123,6 +128,12 @@ function headerMetaFor(type: Approval["type"]) {
       return { label: "Human action required", icon: Hand, iconBg: "bg-amber-100 text-amber-800" };
     case "proposal_review":
       return { label: "Proposal review", icon: Mail, iconBg: "bg-emerald-100 text-emerald-700" };
+    case "playbook_approval":
+      return {
+        label: "Playbook final review",
+        icon: BookOpen,
+        iconBg: "bg-violet-100 text-violet-700",
+      };
     default:
       return { label: String(type), icon: Search, iconBg: "bg-muted text-muted-foreground" };
   }
@@ -523,6 +534,90 @@ function ProposalReviewBody({ approval, isPending }: { approval: ApprovalRow; is
           </Button>
           <Button variant="outline" onClick={onReject} disabled={pending} size="sm">
             <X className="mr-1.5 h-3 w-3" /> Reject draft
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function PlaybookApprovalBody({
+  approval,
+  isPending,
+}: {
+  approval: ApprovalRow;
+  isPending: boolean;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const p = (approval.payload ?? {}) as Partial<PlaybookApprovalPayload>;
+  const playbookId = approval.related_playbook_id;
+  const reviewLink = playbookId ? `/playbooks/${playbookId}` : null;
+
+  function onApprove() {
+    setError(null);
+    if (
+      !confirm(
+        "Approve this playbook? It will become the live, approved version for this client and the sales agents will go live.",
+      )
+    )
+      return;
+    start(async () => {
+      const r = await approveApproval({ id: approval.id });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+  function onReject() {
+    setError(null);
+    if (!confirm("Reject this playbook? The client will need to redo the interview.")) return;
+    start(async () => {
+      const r = await rejectApproval({ id: approval.id });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  return (
+    <>
+      {approval.summary && (
+        <p className="mb-3 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          {approval.summary}
+        </p>
+      )}
+      <div className="rounded-lg border border-violet-200 bg-violet-50/40 p-3 text-sm text-violet-900">
+        <p>
+          <strong>{p.client_name ?? "The client"}</strong> finished the onboarding
+          interview and approved their generated playbook
+          {(p.feedback_round_count ?? 0) > 0
+            ? ` after ${p.feedback_round_count} round${(p.feedback_round_count ?? 0) === 1 ? "" : "s"} of revisions`
+            : ""}
+          . Final HOS sign-off here makes the playbook live and the agents
+          start running.
+        </p>
+      </div>
+      {error && <Alert variant="destructive" className="mt-3">{error}</Alert>}
+      {isPending && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {reviewLink && (
+            <Button asChild variant="outline" size="sm">
+              <Link href={reviewLink}>
+                <ExternalLink className="mr-1.5 h-3 w-3" /> Review playbook
+              </Link>
+            </Button>
+          )}
+          <Button onClick={onApprove} disabled={pending} size="sm">
+            <Check className="mr-1.5 h-3 w-3" /> Approve · Go live
+          </Button>
+          <Button variant="outline" onClick={onReject} disabled={pending} size="sm">
+            <X className="mr-1.5 h-3 w-3" /> Reject
           </Button>
         </div>
       )}

@@ -33,7 +33,14 @@ export async function updateSession(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
   const isAuthRoute = pathname.startsWith("/login") || pathname.startsWith("/signup");
-  const isPublicRoute = pathname === "/" || isAuthRoute || pathname.startsWith("/api/webhooks");
+  const isPublicRoute =
+    pathname === "/" ||
+    isAuthRoute ||
+    pathname.startsWith("/api/webhooks") ||
+    // Public onboarding interview link sent to client contacts after the
+    // proposal email goes out. No login required — gated by the unique token.
+    pathname.startsWith("/onboard/") ||
+    pathname.startsWith("/api/onboarding/");
 
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();

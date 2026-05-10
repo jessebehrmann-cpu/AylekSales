@@ -9,7 +9,9 @@ import { Button } from "@/components/ui/button";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { EditClientForm } from "./edit-client-form";
 import { RunProspectButton } from "./run-prospect-button";
+import { OnboardingTimelineCard } from "./onboarding-timeline";
 import { ExternalLink, Users, Send } from "lucide-react";
+import type { OnboardingSession } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +20,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   const isAdmin = user.profile?.role === "admin";
 
   const supabase = createClient();
-  const [{ data: client }, { data: leads }, { data: campaigns }, { data: events }] = await Promise.all([
+  const [{ data: client }, { data: leads }, { data: campaigns }, { data: events }, { data: onboardingRows }] = await Promise.all([
     supabase.from("clients").select("*").eq("id", params.id).maybeSingle(),
     supabase
       .from("leads")
@@ -38,9 +40,15 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
       .eq("client_id", params.id)
       .order("created_at", { ascending: false })
       .limit(20),
+    supabase
+      .from("onboarding_sessions")
+      .select("*")
+      .eq("client_id", params.id)
+      .order("created_at", { ascending: false }),
   ]);
 
   if (!client) notFound();
+  const onboardingSessions = (onboardingRows ?? []) as OnboardingSession[];
 
   return (
     <>
@@ -80,6 +88,10 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             )}
           </CardContent>
         </Card>
+      </div>
+
+      <div className="mt-6">
+        <OnboardingTimelineCard sessions={onboardingSessions} />
       </div>
 
       <Card className="mt-6">
