@@ -11,10 +11,14 @@ import type {
   LeadStage,
   MeetingOutcome,
   Playbook,
-  ProposalReviewPayload,
   SalesProcessStage,
 } from "@/lib/supabase/types";
-import { HAVE_MEETING_STAGE_ID, isHumanStage } from "@/lib/playbook-defaults";
+import { HAVE_MEETING_STAGE_ID } from "@/lib/playbook-defaults";
+import {
+  markCurrentStageComplete,
+  SEND_PROPOSAL_STAGE_ID,
+  transitionLeadToStage,
+} from "@/lib/stage-engine";
 import {
   anthropic,
   ANTHROPIC_KEY_MISSING_MESSAGE,
@@ -206,15 +210,16 @@ export async function deleteLeadAndRedirect(leadId: string): Promise<void> {
 }
 
 /**
- * HOS marks the current human-owned process stage complete. The lead
- * advances to the next stage in the playbook's sales_process. If the next
- * stage is also human, automation stays paused (HOS will mark that one too).
- * If the next stage is owned by an agent, automation may resume on the next
- * cron tick.
+ * HOS marks the current human-owned process stage complete. Delegates to
+ * the stage engine, which:
+ *   • resolves the open `human_stage_task` for the current stage,
+ *   • advances the lead to the next stage,
+ *   • runs every destination-side effect (e.g. auto-create proposal_review
+ *     if the next stage is Send Proposal).
  *
- * Refuses to act if the lead's current stage isn't owned by a human (so
- * accidental clicks on a non-human stage are no-ops). Refuses on the
- * Have-Meeting stage too — that goes through submitMeetingNotes() instead.
+ * Refuses to act if the lead isn't on a human-owned stage. Refuses on
+ * Have-Meeting unless `allowHaveMeeting` is set — that path goes through
+ * submitMeetingNotes() so we capture meeting context.
  */
 export async function markHumanStageComplete(
   leadId: string,
@@ -224,92 +229,34 @@ export async function markHumanStageComplete(
     const user = await requireUser();
     const supabase = createClient();
 
-    const { data: lead } = await supabase
-      .from("leads")
-      .select("client_id, process_stage_id, stage, company_name")
-      .eq("id", leadId)
-      .maybeSingle();
-    if (!lead) return { ok: false, error: "Lead not found" };
-    if (!lead.client_id) return { ok: false, error: "Lead has no client" };
-
-    const { data: pb } = await supabase
-      .from("playbooks")
-      .select("sales_process")
-      .eq("client_id", lead.client_id)
-      .eq("status", "approved")
-      .maybeSingle();
-    const stages = ((pb as { sales_process?: SalesProcessStage[] } | null)?.sales_process ?? []) as SalesProcessStage[];
-    if (stages.length === 0) {
-      return { ok: false, error: "Client has no approved playbook with sales_process stages" };
-    }
-
-    const currentIdx = lead.process_stage_id
-      ? stages.findIndex((s) => s.id === lead.process_stage_id)
-      : -1;
-    if (currentIdx === -1) {
-      return { ok: false, error: "Lead is not on a sales-process stage" };
-    }
-    const currentStage = stages[currentIdx];
-    if (!isHumanStage(currentStage.agent)) {
-      return { ok: false, error: `Current stage "${currentStage.name}" is not human-owned — nothing to mark complete.` };
-    }
-    if (currentStage.id === HAVE_MEETING_STAGE_ID && !opts.allowHaveMeeting) {
-      return {
-        ok: false,
-        error: "Have Meeting completion requires meeting notes — open the post-meeting form.",
-      };
-    }
-
-    const nextStage = stages[currentIdx + 1] ?? null;
-    const nextStageId = nextStage?.id ?? null;
-    const nextIsHuman = nextStage ? isHumanStage(nextStage.agent) : false;
-
-    // Advance lead to next stage (or stay put if this was the last one)
-    if (nextStageId) {
-      const { error } = await supabase
+    if (!opts.allowHaveMeeting) {
+      const { data: lead } = await supabase
         .from("leads")
-        .update({ process_stage_id: nextStageId })
-        .eq("id", leadId);
-      if (error) return { ok: false, error: error.message };
+        .select("process_stage_id")
+        .eq("id", leadId)
+        .maybeSingle();
+      if (lead?.process_stage_id === HAVE_MEETING_STAGE_ID) {
+        return {
+          ok: false,
+          error: "Have Meeting completion requires meeting notes — open the post-meeting form.",
+        };
+      }
     }
 
-    // Resolve any open human_stage_task approval for this stage.
-    await supabase
-      .from("approvals")
-      .update({
-        status: "approved",
-        approved_by: user.auth.id,
-        decided_at: new Date().toISOString(),
-      })
-      .eq("client_id", lead.client_id)
-      .eq("type", "human_stage_task")
-      .eq("status", "pending")
-      .filter("payload->>stage_id", "eq", currentStage.id)
-      .filter("payload->>lead_id", "eq", leadId);
-
-    await logEvent({
-      event_type: "stage_changed",
-      lead_id: leadId,
-      client_id: lead.client_id,
-      user_id: user.auth.id,
-      payload: {
-        kind: "human_stage_completed",
-        lead_name: lead.company_name,
-        completed_stage_id: currentStage.id,
-        completed_stage_name: currentStage.name,
-        next_stage_id: nextStageId,
-        next_stage_agent: nextStage?.agent ?? null,
-        message: nextStage
-          ? `${currentStage.name} marked complete. Advanced to ${nextStage.name}${nextIsHuman ? " (also human)" : ` (handed to ${nextStage.agent})`}.`
-          : `${currentStage.name} marked complete. End of pipeline.`,
-      },
+    const r = await markCurrentStageComplete(supabase, leadId, {
+      userId: user.auth.id,
     });
+    if (!r.ok) return r;
 
     revalidatePath(`/leads/${leadId}`);
     revalidatePath("/leads");
     revalidatePath("/approvals");
     revalidatePath("/dashboard");
-    return { ok: true, next_stage_id: nextStageId, next_is_human: nextIsHuman };
+    return {
+      ok: true,
+      next_stage_id: r.to_stage_id,
+      next_is_human: r.transition?.to_stage_agent === "human",
+    };
   } catch (err) {
     return actionError(err);
   }
@@ -327,10 +274,13 @@ const MeetingNotesSchema = z.object({
 /**
  * Capture the post-meeting form for the Have-Meeting stage. Saves the meeting
  * notes, drafts a follow-up proposal email via Claude (anchored on the
- * playbook strategy + voice + the meeting context), creates a
- * proposal_review approval so HOS can review/edit/send it, then advances the
- * lead from "Have meeting" to "Send proposal" (and resolves the open
- * human_stage_task approval for Have Meeting).
+ * playbook strategy + voice + the meeting context), then hands off to the
+ * stage engine to:
+ *   • resolve the Have-Meeting human_stage_task,
+ *   • advance the lead to the next stage,
+ *   • create the proposal_review approval (the engine auto-creates one
+ *     when entering Send Proposal — we pass our richer drafted context
+ *     through so the engine writes that instead of the placeholder).
  *
  * Replaces the bare Mark Complete on this one stage. Other human stages
  * keep using markHumanStageComplete().
@@ -376,8 +326,8 @@ export async function submitMeetingNotes(
     }
     const nextStage = stages[currentIdx + 1] ?? null;
 
-    // 1. Save meeting note (without related_approval_id yet — we'll patch it
-    // back once the approval is created below).
+    // 1. Save meeting note. We patch related_approval_id in step 4 once the
+    //    engine has created the proposal_review.
     const { data: noteRow, error: noteErr } = await supabase
       .from("meeting_notes")
       .insert({
@@ -396,47 +346,62 @@ export async function submitMeetingNotes(
       return { ok: false, error: noteErr?.message ?? "Failed to save meeting notes" };
     }
 
-    // 2. Draft a follow-up proposal via Claude (graceful when no key)
-    const draft = await draftFollowUpProposal({
-      playbook,
-      lead: {
-        company_name: lead.company_name,
-        contact_name: lead.contact_name,
-        title: lead.title,
-        industry: lead.industry,
-      },
-      outcome: data.outcome,
-      notes: data.notes ?? "",
-      transcript: data.transcript ?? "",
-      objections: data.objections ?? "",
-      next_steps: data.next_steps ?? "",
+    // 2. Draft a follow-up proposal via Claude (graceful when no key). For
+    //    no_show outcomes we skip the draft and let the engine put the
+    //    placeholder in (no proposal yet — wait for the next interaction).
+    const draft = data.outcome === "no_show"
+      ? null
+      : await draftFollowUpProposal({
+          playbook,
+          lead: {
+            company_name: lead.company_name,
+            contact_name: lead.contact_name,
+            title: lead.title,
+            industry: lead.industry,
+          },
+          outcome: data.outcome,
+          notes: data.notes ?? "",
+          transcript: data.transcript ?? "",
+          objections: data.objections ?? "",
+          next_steps: data.next_steps ?? "",
+        });
+
+    // 3. Resolve the open human_stage_task and advance via the engine.
+    //    Pass the drafted proposal context through so the engine writes it
+    //    into the proposal_review approval (instead of the placeholder).
+    const stageResult = await markCurrentStageComplete(supabase, lead.id, {
+      userId: user.auth.id,
+      allowedStageId: currentStage.id,
     });
+    if (!stageResult.ok) return stageResult;
 
     let approvalId: string | null = null;
-    if (data.outcome !== "no_show") {
-      const proposalPayload: ProposalReviewPayload = {
-        meeting_note_id: noteRow.id,
-        drafted_subject: draft.subject,
-        drafted_body: draft.body,
-        outcome: data.outcome,
-        ai_warning: draft.warning ?? null,
-      };
-      const { data: appr, error: apprErr } = await supabase
-        .from("approvals")
-        .insert({
-          client_id: lead.client_id,
-          type: "proposal_review",
-          status: "pending",
-          title: `${lead.company_name}: review proposal draft`,
-          summary: `Post-meeting follow-up (${data.outcome}). Claude drafted a proposal — review + send.`,
-          payload: proposalPayload as unknown as Record<string, unknown>,
-          related_playbook_id: playbook?.id ?? null,
-          created_by: user.auth.id,
-        })
-        .select("id")
-        .single();
-      if (!apprErr && appr) {
-        approvalId = appr.id;
+    if (
+      stageResult.transition?.to_stage_id === SEND_PROPOSAL_STAGE_ID &&
+      draft
+    ) {
+      // The engine created a placeholder proposal_review (no draft was
+      // available at engine time). Patch it with the rich draft we made.
+      const placeholderId = stageResult.transition.proposal_review_approval_id;
+      if (placeholderId) {
+        await supabase
+          .from("approvals")
+          .update({
+            title: `${lead.company_name}: review proposal draft`,
+            summary: `Post-meeting follow-up (${data.outcome}). Claude drafted a proposal — review + send.`,
+            payload: {
+              lead_id: lead.id,
+              meeting_note_id: noteRow.id,
+              drafted_subject: draft.subject,
+              drafted_body: draft.body,
+              outcome: data.outcome,
+              source: "post_meeting",
+              ai_warning: draft.warning ?? null,
+            },
+          })
+          .eq("id", placeholderId);
+        approvalId = placeholderId;
+
         await supabase
           .from("meeting_notes")
           .update({
@@ -445,31 +410,7 @@ export async function submitMeetingNotes(
             drafted_proposal_body: draft.body,
           })
           .eq("id", noteRow.id);
-      } else {
-        console.error("[meeting-notes] proposal_review approval create failed", apprErr);
       }
-    }
-
-    // 3. Resolve the open human_stage_task approval for Have Meeting
-    await supabase
-      .from("approvals")
-      .update({
-        status: "approved",
-        approved_by: user.auth.id,
-        decided_at: new Date().toISOString(),
-      })
-      .eq("client_id", lead.client_id)
-      .eq("type", "human_stage_task")
-      .eq("status", "pending")
-      .filter("payload->>stage_id", "eq", currentStage.id)
-      .filter("payload->>lead_id", "eq", lead.id);
-
-    // 4. Advance lead to next stage
-    if (nextStage) {
-      await supabase
-        .from("leads")
-        .update({ process_stage_id: nextStage.id })
-        .eq("id", lead.id);
     }
 
     await logEvent({
@@ -636,8 +577,8 @@ export async function unsubscribeLead(leadId: string): Promise<ActionResult> {
 
 /**
  * Manually move a lead to a sales-process stage (clicking a node on the
- * timeline). If the destination stage is owned by a human agent, also log a
- * `human_handoff_required` event so HOS sees the task on the dashboard.
+ * timeline). Delegates to the stage engine, which handles every
+ * destination-side effect (human task, proposal review, paused outreach).
  */
 export async function moveLeadToProcessStage(
   leadId: string,
@@ -647,110 +588,14 @@ export async function moveLeadToProcessStage(
     const user = await requireUser();
     const supabase = createClient();
 
-    const { data: lead } = await supabase
-      .from("leads")
-      .select("client_id, process_stage_id, company_name, contact_name")
-      .eq("id", leadId)
-      .maybeSingle();
-    if (!lead) return { ok: false, error: "Lead not found" };
-
-    // Look up the stage definition from the client's approved playbook
-    let stage: SalesProcessStage | null = null;
-    if (lead.client_id) {
-      const { data: pb } = await supabase
-        .from("playbooks")
-        .select("sales_process")
-        .eq("client_id", lead.client_id)
-        .eq("status", "approved")
-        .maybeSingle();
-      const stages = (pb as { sales_process?: SalesProcessStage[] } | null)?.sales_process ?? [];
-      stage = stages.find((s) => s.id === stageId) ?? null;
-    }
-
-    const before = lead.process_stage_id;
-    const { error } = await supabase
-      .from("leads")
-      .update({ process_stage_id: stageId })
-      .eq("id", leadId);
-    if (error) return { ok: false, error: error.message };
-
-    await logEvent({
-      event_type: "stage_changed",
-      lead_id: leadId,
-      client_id: lead.client_id,
-      user_id: user.auth.id,
-      payload: {
-        kind: "process_stage_moved",
-        lead_name: lead.company_name,
-        before,
-        after: stageId,
-        stage_name: stage?.name ?? stageId,
-        agent: stage?.agent ?? null,
-      },
+    const r = await transitionLeadToStage(supabase, leadId, stageId, {
+      userId: user.auth.id,
     });
-
-    if (stage && isHumanStage(stage.agent)) {
-      // Pause outreach: cancel all pending emails for this lead while
-      // they sit in a human-owned stage. They get re-queued (if at all)
-      // when the lead advances back into an agent-owned stage.
-      await supabase
-        .from("emails")
-        .update({ status: "failed" })
-        .eq("lead_id", leadId)
-        .eq("status", "pending");
-
-      // Per-stage approval: create a human_stage_task approval row each
-      // time a lead enters a human-owned stage. The Mark Complete action
-      // auto-resolves it. Skip if there's already an open task for this
-      // exact (lead, stage) — re-runs shouldn't pile up duplicates.
-      // (Approvals require a client_id; orphaned leads skip the task row.)
-      if (lead.client_id) {
-        const { data: existingTask } = await supabase
-          .from("approvals")
-          .select("id")
-          .eq("type", "human_stage_task")
-          .eq("status", "pending")
-          .eq("client_id", lead.client_id)
-          .filter("payload->>stage_id", "eq", stage.id)
-          .filter("payload->>lead_id", "eq", leadId)
-          .limit(1)
-          .maybeSingle();
-        if (!existingTask) {
-          await supabase.from("approvals").insert({
-            client_id: lead.client_id,
-            type: "human_stage_task",
-            status: "pending",
-            title: `${lead.company_name}: ${stage.name}`,
-            summary: `Lead reached a human-owned stage. Automation paused — HOS to mark the stage complete.`,
-            payload: {
-              stage_id: stage.id,
-              stage_name: stage.name,
-              agent: stage.agent,
-              lead_id: leadId,
-              message: `Lead reached "${stage.name}" — automation paused, awaiting human action.`,
-            } as Record<string, unknown>,
-            created_by: user.auth.id,
-          });
-        }
-      }
-
-      await logEvent({
-        event_type: "ai_action",
-        lead_id: leadId,
-        client_id: lead.client_id,
-        user_id: user.auth.id,
-        payload: {
-          kind: "human_handoff_required",
-          lead_name: lead.company_name,
-          stage_name: stage.name,
-          stage_id: stage.id,
-          message: `Lead reached "${stage.name}" — automation paused, awaiting human action. HOS to mark complete to advance.`,
-        },
-      });
-    }
+    if (!r.ok) return r;
 
     revalidatePath(`/leads/${leadId}`);
     revalidatePath("/leads");
+    revalidatePath("/approvals");
     revalidatePath("/dashboard");
     return { ok: true };
   } catch (err) {

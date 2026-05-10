@@ -315,14 +315,19 @@ export type HumanStageTaskPayload = {
 };
 
 /**
- * Payload shape for type='proposal_review' approvals — created after a
- * Have-Meeting completion when Claude has drafted a follow-up proposal.
+ * Payload shape for type='proposal_review' approvals — created either after
+ * a Have-Meeting completion (with meeting context) or auto-created when a
+ * lead enters the Send Proposal stage from any other path. `lead_id` is the
+ * authoritative pointer; `meeting_note_id` is only present when the
+ * approval was anchored on a captured meeting note.
  */
 export type ProposalReviewPayload = {
-  meeting_note_id: string;
+  lead_id: string;
+  meeting_note_id: string | null;
   drafted_subject: string;
   drafted_body: string;
-  outcome: MeetingOutcome;
+  outcome: MeetingOutcome | null;
+  source: "post_meeting" | "auto_on_send_proposal";
   ai_warning?: string | null;
 };
 export type ApprovalStatus = "pending" | "approved" | "rejected";

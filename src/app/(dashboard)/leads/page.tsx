@@ -9,7 +9,8 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import { Users, Upload, Plus } from "lucide-react";
 import { InlineApprovalCell } from "./inline-approval-cell";
 import { ProcessStageCell } from "./process-stage-cell";
-import { LeadStatusPill, computeLeadStatus } from "./lead-status-pill";
+import { LeadStatusPill } from "./lead-status-pill";
+import { computeLeadStatus, fetchProposalApprovalSets } from "@/lib/lead-status";
 import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
 import type { LeadApprovalStatus, LeadStage, SalesProcessStage } from "@/lib/supabase/types";
 
@@ -97,41 +98,14 @@ export default async function LeadsPage({
   const activeFilter = searchParams.client && clients?.find((c) => c.id === searchParams.client)?.name;
   const showApprovalColumn = !!searchParams.approval;
 
-  // Build two Sets keyed by lead_id, one per proposal_review state, so the
-  // Status column can show "Proposal sent" (approved) vs "Proposal pending
-  // review" (still pending). Two joins: meeting_notes -> approvals (via
-  // related_approval_id) — done in one round trip per lookup type.
-  const leadIdsWithSentProposal = new Set<string>();
-  const leadIdsWithPendingProposal = new Set<string>();
+  // Pre-fetch proposal_review approval sets (Set<lead_id>) so the Status
+  // column can show "Proposal sent" vs "Proposal pending review" without
+  // N+1ing per row. Single source of truth: the helper resolves leads via
+  // the approval payload's lead_id (set by the stage engine on every
+  // proposal_review created from now on).
   const visibleLeadIds = ((leads ?? []) as LeadRow[]).map((l) => l.id);
-  if (visibleLeadIds.length > 0) {
-    const { data: notes } = await supabase
-      .from("meeting_notes")
-      .select("lead_id, related_approval_id")
-      .in("lead_id", visibleLeadIds);
-    const noteRows = (notes ?? []) as Array<{
-      lead_id: string;
-      related_approval_id: string | null;
-    }>;
-    const approvalIds = noteRows
-      .map((n) => n.related_approval_id)
-      .filter((id): id is string => !!id);
-    if (approvalIds.length > 0) {
-      const { data: proposalApprovals } = await supabase
-        .from("approvals")
-        .select("id, status")
-        .in("id", approvalIds);
-      const statusById = new Map(
-        ((proposalApprovals ?? []) as Array<{ id: string; status: string }>).map((a) => [a.id, a.status] as const),
-      );
-      for (const n of noteRows) {
-        if (!n.related_approval_id) continue;
-        const status = statusById.get(n.related_approval_id);
-        if (status === "approved") leadIdsWithSentProposal.add(n.lead_id);
-        else if (status === "pending") leadIdsWithPendingProposal.add(n.lead_id);
-      }
-    }
-  }
+  const { sent: leadIdsWithSentProposal, pending: leadIdsWithPendingProposal } =
+    await fetchProposalApprovalSets(supabase, visibleLeadIds);
 
   // Distinct sales-process stages across the loaded clients — used to
   // populate the filter dropdown. Order is preserved from the first client

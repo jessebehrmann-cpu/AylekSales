@@ -224,7 +224,8 @@ export async function approveProposalReview(
     }
 
     const payload = (approval.payload ?? {}) as Partial<{
-      meeting_note_id: string;
+      lead_id: string;
+      meeting_note_id: string | null;
       drafted_subject: string;
       drafted_body: string;
     }>;
@@ -233,26 +234,51 @@ export async function approveProposalReview(
     if (!subject || !body) {
       return { ok: false, error: "Subject and body are required to send." };
     }
-    if (!payload.meeting_note_id) {
-      return { ok: false, error: "Approval has no meeting_note reference" };
-    }
 
-    // Find the lead via the meeting_note
-    const { data: noteRow } = await supabase
-      .from("meeting_notes")
-      .select("lead_id, client_id, leads(email, company_name, contact_name)")
-      .eq("id", payload.meeting_note_id)
-      .maybeSingle();
-    const note = noteRow as
-      | {
-          lead_id: string;
-          client_id: string | null;
-          leads: { email: string | null; company_name: string; contact_name: string | null } | null;
-        }
-      | null;
-    if (!note?.leads?.email) {
+    // Resolve the lead. Prefer payload.lead_id (always present on approvals
+    // created by the stage engine). Fall back to a meeting_notes join for
+    // legacy rows that only carry meeting_note_id.
+    let leadIdResolved: string | null = payload.lead_id ?? null;
+    let leadEmail: string | null = null;
+    let leadClientId: string | null = null;
+    if (leadIdResolved) {
+      const { data: leadRow } = await supabase
+        .from("leads")
+        .select("id, email, client_id")
+        .eq("id", leadIdResolved)
+        .maybeSingle();
+      const lead = leadRow as { id: string; email: string | null; client_id: string | null } | null;
+      if (!lead) return { ok: false, error: "Lead not found for this approval." };
+      leadEmail = lead.email;
+      leadClientId = lead.client_id;
+    } else if (payload.meeting_note_id) {
+      const { data: noteRow } = await supabase
+        .from("meeting_notes")
+        .select("lead_id, client_id, leads(email)")
+        .eq("id", payload.meeting_note_id)
+        .maybeSingle();
+      const note = noteRow as
+        | {
+            lead_id: string;
+            client_id: string | null;
+            leads: { email: string | null } | null;
+          }
+        | null;
+      if (!note) return { ok: false, error: "Meeting note not found for this approval." };
+      leadIdResolved = note.lead_id;
+      leadEmail = note.leads?.email ?? null;
+      leadClientId = note.client_id;
+    } else {
+      return { ok: false, error: "Approval has no lead reference." };
+    }
+    if (!leadEmail) {
       return { ok: false, error: "Lead has no email address — cannot send." };
     }
+    const note = {
+      lead_id: leadIdResolved,
+      client_id: leadClientId,
+      leads: { email: leadEmail },
+    };
 
     // Send via Resend
     let resendId: string | null = null;
