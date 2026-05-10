@@ -111,12 +111,33 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
+          {(() => {
+            const pendingProposal = proposalApprovals.find((a) => a.status === "pending");
+            if (!pendingProposal) return null;
+            return (
+              <Link
+                href={`/approvals?status=pending#${pendingProposal.id}`}
+                className="flex items-center gap-3 rounded-lg border border-emerald-300/60 bg-emerald-50 px-4 py-3 transition-colors hover:bg-emerald-100/70"
+              >
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">📤</span>
+                <p className="flex-1 text-sm text-emerald-900">
+                  <strong>Proposal pending review</strong> — Sales-01 drafted a follow-up after the meeting.
+                  Review and send from the approval queue.
+                </p>
+                <span className="rounded-md border border-emerald-400/60 bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-900">
+                  Open →
+                </span>
+              </Link>
+            );
+          })()}
+
           <CommunicationHistory
             emails={emails ?? []}
             events={events ?? []}
             meetings={meetings ?? []}
             meetingNotes={meetingNotes ?? []}
             proposalApprovals={proposalApprovals}
+            stages={processStages}
           />
 
           <Card>

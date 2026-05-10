@@ -1,5 +1,4 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { formatDateTime } from "@/lib/utils";
 import {
   ArrowLeftCircle,
@@ -21,21 +20,26 @@ import type {
   Meeting,
   MeetingNote,
   ProposalReviewPayload,
+  SalesProcessStage,
 } from "@/lib/supabase/types";
 
 /**
- * Communication history — 4 grouped sections that read like a deal timeline:
- *   1. Outreach        — emails sent + replies + opens + bounces
- *   2. Meetings        — meeting bookings + captured meeting notes
- *   3. Proposals       — proposal_review approvals (drafts awaiting send)
- *   4. Stage changes   — process-stage advancements with agent attribution
+ * Communication history — a single chronological timeline of every signal
+ * tied to this lead, oldest → newest, with the active sales-process stage
+ * as a small grey milestone label above each entry.
  *
- * Inside each section, items are oldest → newest top to bottom (so the deal
- * reads as a story). Plain-English labels — no `stage_changed` in the UI.
+ * Stage at time T is reconstructed by walking the lead's `stage_changed`
+ * events in order — items emitted before any stage_changed default to the
+ * playbook's first stage (typically Prospect).
+ *
+ * Plain-English labels everywhere — never raw event_type strings.
  */
 
 type Item = {
   ts: string;
+  /** Sales-process stage id active at this moment in the deal. Used to
+   *  derive the [Stage] label printed above each entry. */
+  stageId: string | null;
   title: string;
   preview?: string | null;
   icon: LucideIcon;
@@ -49,19 +53,48 @@ export function CommunicationHistory({
   meetings = [],
   meetingNotes = [],
   proposalApprovals = [],
+  stages = [],
 }: {
   emails?: Email[];
   events?: AppEvent[];
   meetings?: Meeting[];
   meetingNotes?: MeetingNote[];
   proposalApprovals?: Approval[];
+  stages?: SalesProcessStage[];
 }) {
-  const outreach: Item[] = [];
-  const meetingItems: Item[] = [];
-  const proposalItems: Item[] = [];
-  const stageItems: Item[] = [];
+  // ── 1. Reconstruct stage history from stage_changed events ──────────────
+  // Each entry: at this timestamp, the lead is now at this stage_id.
+  type StageMark = { ts: string; stageId: string };
+  const stageHistory: StageMark[] = [];
+  for (const e of events) {
+    if (e.event_type !== "stage_changed") continue;
+    const payload = (e.payload ?? {}) as Record<string, unknown>;
+    const next =
+      stringValue(payload.next_stage_id) ??
+      stringValue(payload.after) ??
+      stringValue(payload.stage_id) ??
+      null;
+    if (next) stageHistory.push({ ts: e.created_at, stageId: next });
+  }
+  stageHistory.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 
-  // ── Outreach ────────────────────────────────────────────────────────────
+  // The default stage before any stage_change has happened — first stage in
+  // the playbook (typically "Prospect").
+  const firstStageId = stages[0]?.id ?? null;
+  function stageAt(ts: string): string | null {
+    let cur = firstStageId;
+    for (const m of stageHistory) {
+      if (m.ts <= ts) cur = m.stageId;
+      else break;
+    }
+    return cur;
+  }
+  const stageNameById = new Map(stages.map((s) => [s.id, s.name] as const));
+
+  // ── 2. Build items from each source ─────────────────────────────────────
+  const items: Item[] = [];
+
+  // Emails
   for (const e of emails) {
     const subj = e.subject ?? "(no subject)";
     const stepLabel = e.step_number != null ? ` · step ${e.step_number}` : "";
@@ -87,12 +120,13 @@ export function CommunicationHistory({
           iconClass = "bg-rose-100 text-rose-700";
           break;
         default:
-          title = `${sender} sent an email${stepLabel}`;
+          title = `${sender} sent email: "${subj}"${stepLabel}`;
       }
-      outreach.push({ ts: sentTs, title, preview: subj, icon, iconClass, who: sender });
+      items.push({ ts: sentTs, stageId: null, title, preview: subj, icon, iconClass, who: sender });
       if (e.opened_at) {
-        outreach.push({
+        items.push({
           ts: e.opened_at,
+          stageId: null,
           title: `Lead opened the message${stepLabel}`,
           preview: subj,
           icon: Eye,
@@ -100,8 +134,9 @@ export function CommunicationHistory({
         });
       }
       if (e.replied_at || e.reply_body) {
-        outreach.push({
+        items.push({
           ts: e.replied_at ?? sentTs,
+          stageId: null,
           title: `Lead replied${stepLabel}`,
           preview: e.reply_body ?? subj,
           icon: ArrowLeftCircle,
@@ -110,9 +145,9 @@ export function CommunicationHistory({
         });
       }
     } else {
-      // inbound row recorded directly (raw inbound email)
-      outreach.push({
+      items.push({
         ts: e.replied_at ?? e.created_at,
+        stageId: null,
         title: "Lead sent an inbound email",
         preview: e.body ?? e.reply_body ?? subj,
         icon: ArrowLeftCircle,
@@ -122,10 +157,11 @@ export function CommunicationHistory({
     }
   }
 
-  // ── Meetings ────────────────────────────────────────────────────────────
+  // Meetings (bookings)
   for (const m of meetings) {
-    meetingItems.push({
+    items.push({
       ts: m.scheduled_at ?? m.created_at,
+      stageId: null,
       title: `Meeting ${m.status === "scheduled" ? "booked" : m.status}`,
       preview: m.notes ?? `${m.format} · ${m.duration_minutes} min`,
       icon: CalendarDays,
@@ -133,30 +169,33 @@ export function CommunicationHistory({
       who: "Sales-01",
     });
   }
+
+  // Meeting notes (post-meeting captures)
   for (const n of meetingNotes) {
-    meetingItems.push({
+    items.push({
       ts: n.created_at,
-      title: `Meeting outcome: ${prettyOutcome(n.outcome)}`,
-      preview:
-        n.next_steps ?? n.notes ?? n.objections ?? "(no notes captured)",
+      stageId: null,
+      title: `HOS marked meeting complete: ${prettyOutcome(n.outcome)}`,
+      preview: n.next_steps ?? n.notes ?? n.objections ?? "(no notes captured)",
       icon: ClipboardList,
       iconClass: "bg-emerald-100 text-emerald-700",
       who: "HOS",
     });
   }
 
-  // ── Proposals ───────────────────────────────────────────────────────────
+  // Proposal review approvals (drafts + sent)
   for (const a of proposalApprovals) {
     const payload = (a.payload ?? {}) as Partial<ProposalReviewPayload>;
     const status =
       a.status === "approved"
-        ? "sent"
+        ? "sent to lead"
         : a.status === "rejected"
-        ? "rejected"
+        ? "rejected by HOS"
         : "pending HOS review";
-    proposalItems.push({
+    items.push({
       ts: a.created_at,
-      title: `Sales-01 drafted a proposal — ${status}`,
+      stageId: null,
+      title: `Sales-01 drafted proposal — ${status}`,
       preview: payload.drafted_subject ?? "(subject pending)",
       icon: Send,
       iconClass: "bg-emerald-100 text-emerald-700",
@@ -164,7 +203,7 @@ export function CommunicationHistory({
     });
   }
 
-  // ── Stage changes ───────────────────────────────────────────────────────
+  // Events — stage changes, notes, handoffs
   for (const e of events) {
     const payload = (e.payload ?? {}) as Record<string, unknown>;
     const kind = stringValue(payload.kind);
@@ -175,16 +214,19 @@ export function CommunicationHistory({
         stringValue(payload.completed_stage_name);
       const after =
         stageName ??
-        stringValue(payload.next_stage_id) ??
-        stringValue(payload.after) ??
+        prettyStageId(stringValue(payload.next_stage_id), stageNameById) ??
+        prettyStageId(stringValue(payload.after), stageNameById) ??
         "next stage";
-      const before = stringValue(payload.before) ?? null;
-      const movedBy = stringValue(payload.next_stage_agent) ?? stringValue(payload.agent) ?? "system";
+      const movedBy =
+        stringValue(payload.next_stage_agent) ??
+        stringValue(payload.agent) ??
+        "system";
       const moverLabel = labelForAgent(movedBy);
 
       let title: string;
       if (kind === "human_stage_completed") {
-        title = `HOS marked "${stringValue(payload.completed_stage_name) ?? "the stage"}" complete — advanced to ${after}`;
+        const completed = stringValue(payload.completed_stage_name) ?? "the stage";
+        title = `HOS marked "${completed}" complete — advanced to ${after}`;
       } else if (kind === "process_stage_moved") {
         title = `${moverLabel} moved this lead to ${after}`;
       } else if (kind === "unsubscribed_via_button") {
@@ -192,11 +234,12 @@ export function CommunicationHistory({
       } else if (kind === "manual_stage_update") {
         title = `Lead stage updated → ${after}`;
       } else {
-        title = `Moved to ${after}${before ? ` (was ${before})` : ""}`;
+        title = `Moved to ${after}`;
       }
 
-      stageItems.push({
+      items.push({
         ts: e.created_at,
+        stageId: null,
         title,
         preview: stringValue(payload.message) ?? null,
         icon: Workflow,
@@ -207,8 +250,9 @@ export function CommunicationHistory({
     }
 
     if (e.event_type === "ai_action" && kind === "human_handoff_required") {
-      stageItems.push({
+      items.push({
         ts: e.created_at,
+        stageId: null,
         title: `Handed off to a human at "${stringValue(payload.stage_name) ?? "stage"}"`,
         preview: stringValue(payload.message) ?? null,
         icon: Workflow,
@@ -218,9 +262,36 @@ export function CommunicationHistory({
       continue;
     }
 
-    if (e.event_type === "note_added") {
-      stageItems.push({
+    if (e.event_type === "ai_action" && kind === "prospect_run") {
+      items.push({
         ts: e.created_at,
+        stageId: null,
+        title: `Prospect-01 sourced this lead`,
+        preview: null,
+        icon: ArrowRightCircle,
+        iconClass: "bg-emerald-100 text-emerald-700",
+        who: "Prospect-01",
+      });
+      continue;
+    }
+
+    if (e.event_type === "lead_imported") {
+      items.push({
+        ts: e.created_at,
+        stageId: null,
+        title: "Lead added",
+        preview: null,
+        icon: ArrowRightCircle,
+        iconClass: "bg-slate-100 text-slate-700",
+        who: stringValue(payload.kind) === "csv_import" ? "HOS (CSV import)" : "HOS",
+      });
+      continue;
+    }
+
+    if (e.event_type === "note_added") {
+      items.push({
+        ts: e.created_at,
+        stageId: null,
         title: "HOS added an internal note",
         preview: stringValue(payload.note) ?? null,
         icon: FileText,
@@ -230,72 +301,61 @@ export function CommunicationHistory({
     }
   }
 
-  // Sort each group oldest → newest so the deal reads as a story
-  outreach.sort(byOldestFirst);
-  meetingItems.sort(byOldestFirst);
-  proposalItems.sort(byOldestFirst);
-  stageItems.sort(byOldestFirst);
-
-  const totalCount =
-    outreach.length + meetingItems.length + proposalItems.length + stageItems.length;
+  // ── 3. Sort + assign stage labels ───────────────────────────────────────
+  items.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  for (const it of items) {
+    it.stageId = stageAt(it.ts);
+  }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Communication history ({totalCount})</CardTitle>
+        <CardTitle className="text-base">Communication history ({items.length})</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-6">
-        <Section title="Outreach" empty="No emails yet." items={outreach} />
-        <Section title="Meetings" empty="No meetings or meeting notes yet." items={meetingItems} />
-        <Section title="Proposals" empty="No drafted proposals yet." items={proposalItems} />
-        <Section title="Stage changes" empty="Stage changes will appear here as the lead moves through the pipeline." items={stageItems} />
-      </CardContent>
-    </Card>
-  );
-}
-
-function Section({ title, items, empty }: { title: string; items: Item[]; empty: string }) {
-  return (
-    <div>
-      <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">
-        {title}
-      </p>
-      {items.length === 0 ? (
-        <p className="text-sm text-muted-foreground">{empty}</p>
-      ) : (
-        <ul className="space-y-3">
-          {items.map((it, i) => {
-            const Icon = it.icon;
-            return (
-              <li key={i} className="flex gap-3">
-                <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${it.iconClass}`}>
-                  <Icon className="h-3.5 w-3.5" />
-                </div>
-                <div className="min-w-0 flex-1">
+      <CardContent>
+        {items.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Nothing yet — the timeline populates as agents act and the lead moves through the pipeline.
+          </p>
+        ) : (
+          <ol className="relative ml-3 space-y-4 border-l border-border pl-6">
+            {items.map((it, i) => {
+              const prev = i > 0 ? items[i - 1] : null;
+              const stageChanged =
+                !prev || prev.stageId !== it.stageId;
+              const stageName =
+                (it.stageId && stageNameById.get(it.stageId)) ?? it.stageId ?? null;
+              const Icon = it.icon;
+              return (
+                <li key={i} className="relative">
+                  {stageChanged && stageName && (
+                    <p className="-ml-9 mb-2 inline-block rounded-md bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+                      {stageName} stage
+                    </p>
+                  )}
+                  <span
+                    className={`absolute -left-[34px] flex h-6 w-6 items-center justify-center rounded-full border-2 border-background ${it.iconClass}`}
+                  >
+                    <Icon className="h-3 w-3" />
+                  </span>
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <p className="text-sm font-medium">{it.title}</p>
-                    <span className="shrink-0 text-xs text-muted-foreground">{formatDateTime(it.ts)}</span>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {it.who ? `${it.who} · ` : ""}
+                      {formatDateTime(it.ts)}
+                    </span>
                   </div>
                   {it.preview && (
                     <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{it.preview}</p>
                   )}
-                  {it.who && (
-                    <Badge variant="muted" className="mt-1 text-[10px]">
-                      {it.who}
-                    </Badge>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
   );
-}
-
-function byOldestFirst(a: Item, b: Item): number {
-  return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0;
 }
 
 function stringValue(v: unknown): string | null {
@@ -317,4 +377,9 @@ function prettyOutcome(o: string): string {
     default:
       return o;
   }
+}
+
+function prettyStageId(id: string | null, byId: Map<string, string>): string | null {
+  if (!id) return null;
+  return byId.get(id) ?? id;
 }

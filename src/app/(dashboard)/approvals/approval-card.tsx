@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -16,11 +17,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Check, X, Search, RefreshCw, Plus, ExternalLink } from "lucide-react";
-import { approveApproval, rejectApproval } from "./actions";
+import {
+  Check,
+  X,
+  Search,
+  RefreshCw,
+  Plus,
+  ExternalLink,
+  Hand,
+  Mail,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
+import { approveApproval, approveProposalReview, rejectApproval } from "./actions";
 import type {
   Approval,
+  HumanStageTaskPayload,
   LeadListPayload,
+  ProposalReviewPayload,
   StrategyChangePayload,
 } from "@/lib/supabase/types";
 import { formatDateTime } from "@/lib/utils";
@@ -40,42 +54,131 @@ export function ApprovalCard({
   clientCampaigns?: CampaignOption[];
   batchLeads?: BatchLead[];
 }) {
+  const isPending = approval.status === "pending";
+
+  return (
+    <Card className={isPending ? "border-amber-200 bg-amber-50/30" : undefined}>
+      <CardContent className="pt-6">
+        <ApprovalHeader approval={approval} />
+
+        {approval.type === "lead_list" && (
+          <LeadListBody
+            approval={approval}
+            isPending={isPending}
+            clientCampaigns={clientCampaigns}
+            batchLeads={batchLeads}
+          />
+        )}
+        {approval.type === "strategy_change" && (
+          <StrategyChangeBody approval={approval} isPending={isPending} />
+        )}
+        {approval.type === "human_stage_task" && (
+          <HumanStageTaskBody approval={approval} isPending={isPending} />
+        )}
+        {approval.type === "proposal_review" && (
+          <ProposalReviewBody approval={approval} isPending={isPending} />
+        )}
+
+        {!isPending && approval.decided_at && (
+          <p className="mt-3 text-xs text-muted-foreground">
+            Decided {formatDateTime(approval.decided_at)}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Header (icon + title + type label + status badge)
+// ──────────────────────────────────────────────────────────────────────────
+
+function ApprovalHeader({ approval }: { approval: ApprovalRow }) {
+  const meta = headerMetaFor(approval.type);
+  const Icon = meta.icon;
+  return (
+    <div className="mb-3 flex items-start gap-3">
+      <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${meta.iconBg}`}>
+        <Icon className="h-5 w-5" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="font-semibold">{approval.title}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {approval.clients?.name ? `${approval.clients.name} · ` : ""}
+          {meta.label} · {formatDateTime(approval.created_at)}
+        </p>
+      </div>
+      <Badge variant={statusVariant(approval.status)}>{approval.status}</Badge>
+    </div>
+  );
+}
+
+function headerMetaFor(type: Approval["type"]) {
+  switch (type) {
+    case "lead_list":
+      return { label: "Lead list", icon: Search, iconBg: "bg-emerald-100 text-emerald-700" };
+    case "strategy_change":
+      return { label: "Strategy change", icon: RefreshCw, iconBg: "bg-purple-100 text-purple-700" };
+    case "human_stage_task":
+      return { label: "Human action required", icon: Hand, iconBg: "bg-amber-100 text-amber-800" };
+    case "proposal_review":
+      return { label: "Proposal review", icon: Mail, iconBg: "bg-emerald-100 text-emerald-700" };
+    default:
+      return { label: String(type), icon: Search, iconBg: "bg-muted text-muted-foreground" };
+  }
+}
+
+function statusVariant(status: Approval["status"]) {
+  switch (status) {
+    case "approved":
+      return "success" as const;
+    case "rejected":
+      return "destructive" as const;
+    default:
+      return "warning" as const;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Type-specific bodies
+// ──────────────────────────────────────────────────────────────────────────
+
+function LeadListBody({
+  approval,
+  isPending,
+  clientCampaigns,
+  batchLeads,
+}: {
+  approval: ApprovalRow;
+  isPending: boolean;
+  clientCampaigns: CampaignOption[];
+  batchLeads: BatchLead[];
+}) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
-  const isPending = approval.status === "pending";
-  const Icon = approval.type === "lead_list" ? Search : RefreshCw;
-  const iconBg =
-    approval.type === "lead_list"
-      ? "bg-emerald-100 text-emerald-700"
-      : "bg-purple-100 text-purple-700";
+  const payload = approval.payload as LeadListPayload;
+  const total = payload.lead_ids?.length ?? 0;
+  const preview = batchLeads.slice(0, 6);
+  const remaining = total - preview.length;
 
-  // Lead-list approvals: resolve a campaign at decision time.
-  const leadListPayload =
-    approval.type === "lead_list" ? (approval.payload as LeadListPayload) : null;
-  const payloadCampaignId = leadListPayload?.campaign_id ?? null;
-  const needsCampaignChoice = approval.type === "lead_list" && !payloadCampaignId;
-
-  // Default selection: if payload already has a campaign, lock to that; else
-  // first eligible client campaign; else "create new".
+  const payloadCampaignId = payload.campaign_id ?? null;
+  const needsCampaignChoice = !payloadCampaignId;
   const initialChoice =
-    payloadCampaignId ??
-    clientCampaigns[0]?.id ??
-    (needsCampaignChoice ? NEW_CAMPAIGN_VALUE : "");
+    payloadCampaignId ?? clientCampaigns[0]?.id ?? (needsCampaignChoice ? NEW_CAMPAIGN_VALUE : "");
   const [campaignChoice, setCampaignChoice] = useState<string>(initialChoice);
   const [newCampaignName, setNewCampaignName] = useState<string>("");
 
   function onApprove() {
     setError(null);
-
     type ApproveBody = {
       id: string;
       campaign_id?: string;
       new_campaign?: { name: string };
     };
     const body: ApproveBody = { id: approval.id };
-    if (approval.type === "lead_list" && needsCampaignChoice) {
+    if (needsCampaignChoice) {
       if (campaignChoice === NEW_CAMPAIGN_VALUE) {
         if (!newCampaignName.trim()) {
           setError("Name the new campaign before approving.");
@@ -89,16 +192,7 @@ export function ApprovalCard({
         return;
       }
     }
-
-    if (
-      !confirm(
-        approval.type === "lead_list"
-          ? "Approve and start outreach?"
-          : "Approve this strategy change?",
-      )
-    )
-      return;
-
+    if (!confirm("Approve and start outreach?")) return;
     start(async () => {
       const r = await approveApproval(body);
       if (!r.ok) {
@@ -123,134 +217,16 @@ export function ApprovalCard({
   }
 
   return (
-    <Card className={isPending ? "border-amber-200 bg-amber-50/30" : undefined}>
-      <CardContent className="pt-6">
-        <div className="mb-3 flex items-start gap-3">
-          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${iconBg}`}>
-            <Icon className="h-5 w-5" />
-          </div>
-          <div className="flex-1">
-            <p className="font-semibold">{approval.title}</p>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              {approval.clients?.name ? `${approval.clients.name} · ` : ""}
-              {approval.type === "lead_list" ? "Lead list" : "Strategy change"} ·{" "}
-              {formatDateTime(approval.created_at)}
-            </p>
-          </div>
-          <Badge variant={statusVariant(approval.status)}>{approval.status}</Badge>
-        </div>
-
-        {approval.summary && (
-          <p className="mb-3 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
-            {approval.summary}
-          </p>
-        )}
-
-        <PayloadDetail approval={approval} batchLeads={batchLeads} />
-
-        {/* Campaign picker — only for lead_list approvals without a campaign_id baked in */}
-        {isPending && needsCampaignChoice && (
-          <div className="mt-4 space-y-3 rounded-lg border border-amber-200 bg-amber-50/40 p-3">
-            <div className="space-y-1.5">
-              <Label htmlFor={`campaign-${approval.id}`} className="text-xs uppercase tracking-wider">
-                Send these leads to
-              </Label>
-              <Select value={campaignChoice} onValueChange={setCampaignChoice}>
-                <SelectTrigger id={`campaign-${approval.id}`}>
-                  <SelectValue placeholder="Pick a campaign…" />
-                </SelectTrigger>
-                <SelectContent>
-                  {clientCampaigns.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.name}{" "}
-                      <span className="ml-1 text-xs text-muted-foreground">· {c.status}</span>
-                    </SelectItem>
-                  ))}
-                  <SelectItem value={NEW_CAMPAIGN_VALUE}>
-                    + Create a new campaign
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {campaignChoice === NEW_CAMPAIGN_VALUE && (
-              <div className="space-y-1.5">
-                <Label htmlFor={`new-name-${approval.id}`} className="text-xs uppercase tracking-wider flex items-center gap-1">
-                  <Plus className="h-3 w-3" /> New campaign name
-                </Label>
-                <Input
-                  id={`new-name-${approval.id}`}
-                  value={newCampaignName}
-                  onChange={(e) => setNewCampaignName(e.target.value)}
-                  placeholder="e.g. Q3 Outbound — APAC"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Uses this client&apos;s approved playbook sequence. Will activate immediately.
-                </p>
-              </div>
-            )}
-            {clientCampaigns.length === 0 && campaignChoice !== NEW_CAMPAIGN_VALUE && (
-              <p className="text-xs text-amber-800">
-                No campaigns yet for this client — create one to enrol these leads.
-              </p>
-            )}
-          </div>
-        )}
-
-        {error && error !== "needs_campaign" && (
-          <Alert variant="destructive" className="mt-3">{error}</Alert>
-        )}
-
-        {isPending && (
-          <div className="mt-4 flex gap-2">
-            <Button onClick={onApprove} disabled={pending} size="sm">
-              <Check className="mr-1.5 h-3 w-3" />
-              {approval.type === "lead_list" ? "Approve · Start outreach" : "Approve"}
-            </Button>
-            <Button variant="outline" onClick={onReject} disabled={pending} size="sm">
-              <X className="mr-1.5 h-3 w-3" />
-              Reject
-            </Button>
-          </div>
-        )}
-
-        {!isPending && approval.decided_at && (
-          <p className="mt-3 text-xs text-muted-foreground">
-            Decided {formatDateTime(approval.decided_at)}
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function statusVariant(status: Approval["status"]) {
-  switch (status) {
-    case "approved":
-      return "success" as const;
-    case "rejected":
-      return "destructive" as const;
-    default:
-      return "warning" as const;
-  }
-}
-
-function PayloadDetail({
-  approval,
-  batchLeads,
-}: {
-  approval: Approval;
-  batchLeads: BatchLead[];
-}) {
-  if (approval.type === "lead_list") {
-    const p = approval.payload as LeadListPayload;
-    const total = p.lead_ids?.length ?? 0;
-    const preview = batchLeads.slice(0, 6);
-    const remaining = total - preview.length;
-    return (
+    <>
+      {approval.summary && (
+        <p className="mb-3 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          {approval.summary}
+        </p>
+      )}
       <div className="space-y-2 text-xs text-muted-foreground">
         <p>
           <span className="font-medium text-foreground">{total}</span> lead{total === 1 ? "" : "s"} in this batch
-          {p.source && ` · sourced from ${p.source}`}
+          {payload.source && ` · sourced from ${payload.source}`}
         </p>
         {preview.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
@@ -277,36 +253,281 @@ function PayloadDetail({
           View all leads in this batch <ExternalLink className="h-3 w-3" />
         </Link>
       </div>
-    );
+
+      {isPending && needsCampaignChoice && (
+        <div className="mt-4 space-y-3 rounded-lg border border-amber-200 bg-amber-50/40 p-3">
+          <div className="space-y-1.5">
+            <Label htmlFor={`campaign-${approval.id}`} className="text-xs uppercase tracking-wider">
+              Send these leads to
+            </Label>
+            <Select value={campaignChoice} onValueChange={setCampaignChoice}>
+              <SelectTrigger id={`campaign-${approval.id}`}>
+                <SelectValue placeholder="Pick a campaign…" />
+              </SelectTrigger>
+              <SelectContent>
+                {clientCampaigns.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name} <span className="ml-1 text-xs text-muted-foreground">· {c.status}</span>
+                  </SelectItem>
+                ))}
+                <SelectItem value={NEW_CAMPAIGN_VALUE}>+ Create a new campaign</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {campaignChoice === NEW_CAMPAIGN_VALUE && (
+            <div className="space-y-1.5">
+              <Label htmlFor={`new-name-${approval.id}`} className="flex items-center gap-1 text-xs uppercase tracking-wider">
+                <Plus className="h-3 w-3" /> New campaign name
+              </Label>
+              <Input
+                id={`new-name-${approval.id}`}
+                value={newCampaignName}
+                onChange={(e) => setNewCampaignName(e.target.value)}
+                placeholder="e.g. Q3 Outbound — APAC"
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {error && <Alert variant="destructive" className="mt-3">{error}</Alert>}
+
+      {isPending && (
+        <div className="mt-4 flex gap-2">
+          <Button onClick={onApprove} disabled={pending} size="sm">
+            <Check className="mr-1.5 h-3 w-3" /> Approve · Start outreach
+          </Button>
+          <Button variant="outline" onClick={onReject} disabled={pending} size="sm">
+            <X className="mr-1.5 h-3 w-3" /> Reject
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function StrategyChangeBody({ approval, isPending }: { approval: ApprovalRow; isPending: boolean }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  const p = approval.payload as StrategyChangePayload & { mode?: string; version?: number };
+
+  function onApprove() {
+    setError(null);
+    if (!confirm("Approve this strategy change?")) return;
+    start(async () => {
+      const r = await approveApproval({ id: approval.id });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
   }
-  if (approval.type === "strategy_change") {
-    const p = approval.payload as StrategyChangePayload & { mode?: string; version?: number };
-    if (p.mode === "promote_draft") {
-      return (
+  function onReject() {
+    setError(null);
+    if (!confirm("Reject this approval?")) return;
+    start(async () => {
+      const r = await rejectApproval({ id: approval.id });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  return (
+    <>
+      {approval.summary && (
+        <p className="mb-3 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          {approval.summary}
+        </p>
+      )}
+      {p.mode === "promote_draft" ? (
         <p className="text-xs text-muted-foreground">
           Promotes the draft playbook to approved (v{p.version ?? "—"}). Any prior approved playbook is demoted.
         </p>
-      );
-    }
-    return (
-      <div className="space-y-1 text-xs">
-        {p.reasoning && <p className="text-muted-foreground">{p.reasoning}</p>}
-        <ul className="mt-1 space-y-1 rounded bg-muted/50 p-2 font-mono text-[11px]">
-          {(p.diff ?? []).slice(0, 6).map((d, i) => (
-            <li key={i}>
-              <span className="text-purple-700">{d.path}</span>:{" "}
-              <span className="text-muted-foreground line-through">{stringify(d.before)}</span>{" "}
-              → <span className="text-foreground">{stringify(d.after)}</span>
-            </li>
-          ))}
-          {(p.diff ?? []).length > 6 && (
-            <li className="text-muted-foreground">… and {p.diff.length - 6} more changes</li>
+      ) : (
+        <div className="space-y-1 text-xs">
+          {p.reasoning && <p className="text-muted-foreground">{p.reasoning}</p>}
+          <ul className="mt-1 space-y-1 rounded bg-muted/50 p-2 font-mono text-[11px]">
+            {(p.diff ?? []).slice(0, 6).map((d, i) => (
+              <li key={i}>
+                <span className="text-purple-700">{d.path}</span>:{" "}
+                <span className="text-muted-foreground line-through">{stringify(d.before)}</span>{" "}
+                → <span className="text-foreground">{stringify(d.after)}</span>
+              </li>
+            ))}
+            {(p.diff ?? []).length > 6 && (
+              <li className="text-muted-foreground">… and {p.diff.length - 6} more changes</li>
+            )}
+          </ul>
+        </div>
+      )}
+      {error && <Alert variant="destructive" className="mt-3">{error}</Alert>}
+      {isPending && (
+        <div className="mt-4 flex gap-2">
+          <Button onClick={onApprove} disabled={pending} size="sm">
+            <Check className="mr-1.5 h-3 w-3" /> Approve
+          </Button>
+          <Button variant="outline" onClick={onReject} disabled={pending} size="sm">
+            <X className="mr-1.5 h-3 w-3" /> Reject
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function HumanStageTaskBody({ approval, isPending }: { approval: ApprovalRow; isPending: boolean }) {
+  const p = (approval.payload as HumanStageTaskPayload & { lead_id?: string }) ?? {};
+  // Pull a friendly lead name from the title (which we set on insert as
+  // "<Company>: <Stage>") so the body can read naturally.
+  const [companyPart, stageNameFromTitle] = approval.title.split(":").map((s) => s.trim());
+  const stageName = p.stage_name ?? stageNameFromTitle ?? "this stage";
+  const company = companyPart ?? approval.clients?.name ?? "This lead";
+  const leadId = p.lead_id ?? null;
+
+  return (
+    <>
+      <p className="mb-3 rounded-md bg-amber-100/60 px-3 py-2 text-sm text-amber-900">
+        <strong>{company}</strong> has reached the <strong>{stageName}</strong> stage. Mark this complete once you&apos;ve done the human action (e.g. taken the meeting).
+      </p>
+      {p.message && p.message !== approval.summary && (
+        <p className="text-xs text-muted-foreground">{p.message}</p>
+      )}
+      {isPending && (
+        <div className="mt-4">
+          {leadId ? (
+            <Button asChild size="sm">
+              <Link href={`/leads/${leadId}`}>
+                <ExternalLink className="mr-1.5 h-3 w-3" /> Go to lead
+              </Link>
+            </Button>
+          ) : (
+            <p className="text-xs text-muted-foreground">No lead reference on this approval.</p>
           )}
-        </ul>
-      </div>
-    );
+        </div>
+      )}
+    </>
+  );
+}
+
+function ProposalReviewBody({ approval, isPending }: { approval: ApprovalRow; isPending: boolean }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(true);
+
+  const p = (approval.payload ?? {}) as Partial<ProposalReviewPayload>;
+  const [subject, setSubject] = useState(p.drafted_subject ?? "");
+  const [body, setBody] = useState(p.drafted_body ?? "");
+
+  function onApprove() {
+    setError(null);
+    if (!subject.trim() || !body.trim()) {
+      setError("Subject and body are required.");
+      return;
+    }
+    if (!confirm("Send this proposal email?")) return;
+    start(async () => {
+      const r = await approveProposalReview({
+        approval_id: approval.id,
+        edited_subject: subject.trim(),
+        edited_body: body.trim(),
+      });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
   }
-  return null;
+  function onReject() {
+    setError(null);
+    if (!confirm("Reject this draft? It will not be sent.")) return;
+    start(async () => {
+      const r = await rejectApproval({ id: approval.id });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  return (
+    <>
+      {approval.summary && (
+        <p className="mb-3 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          {approval.summary}
+        </p>
+      )}
+      {p.outcome && (
+        <p className="mb-2 text-xs text-muted-foreground">
+          Meeting outcome: <strong className="text-foreground">{p.outcome}</strong>
+        </p>
+      )}
+      {p.ai_warning && (
+        <Alert className="mb-3 border-amber-300 bg-amber-50 text-amber-900">{p.ai_warning}</Alert>
+      )}
+
+      <div className="rounded-lg border bg-background">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm font-medium hover:bg-muted/50"
+        >
+          <span>Drafted proposal</span>
+          {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </button>
+        {open && (
+          <div className="space-y-3 border-t px-3 py-3">
+            <div className="space-y-1.5">
+              <Label htmlFor={`subj-${approval.id}`} className="text-xs uppercase tracking-wider">
+                Subject
+              </Label>
+              <Input
+                id={`subj-${approval.id}`}
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                disabled={!isPending}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor={`body-${approval.id}`} className="text-xs uppercase tracking-wider">
+                Body
+              </Label>
+              <Textarea
+                id={`body-${approval.id}`}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                rows={10}
+                disabled={!isPending}
+                className="font-mono text-xs"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {error && <Alert variant="destructive" className="mt-3">{error}</Alert>}
+
+      {isPending && (
+        <div className="mt-4 flex gap-2">
+          <Button onClick={onApprove} disabled={pending} size="sm">
+            <Mail className="mr-1.5 h-3 w-3" />
+            {pending ? "Sending…" : "Approve & Send"}
+          </Button>
+          <Button variant="outline" onClick={onReject} disabled={pending} size="sm">
+            <X className="mr-1.5 h-3 w-3" /> Reject draft
+          </Button>
+        </div>
+      )}
+    </>
+  );
 }
 
 function stringify(v: unknown): string {

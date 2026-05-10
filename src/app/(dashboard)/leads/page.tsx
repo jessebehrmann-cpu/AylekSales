@@ -5,11 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/empty-state";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ApprovalBadge } from "@/components/approval-badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { Users, Upload, Plus } from "lucide-react";
 import { InlineApprovalCell } from "./inline-approval-cell";
 import { ProcessStageCell } from "./process-stage-cell";
+import { LeadStatusPill, computeLeadStatus } from "./lead-status-pill";
 import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
 import type { LeadApprovalStatus, LeadStage, SalesProcessStage } from "@/lib/supabase/types";
 
@@ -96,6 +96,37 @@ export default async function LeadsPage({
 
   const activeFilter = searchParams.client && clients?.find((c) => c.id === searchParams.client)?.name;
   const showApprovalColumn = !!searchParams.approval;
+
+  // Build a Set<leadId> of leads that have an approved proposal_review
+  // approval — used by the Status column to surface "Proposal sent". Two
+  // joins: proposal_review approvals → meeting_notes (via payload->>meeting_note_id)
+  // → lead_id. We only care about approvals with status='approved'.
+  const leadIdsWithSentProposal = new Set<string>();
+  const visibleLeadIds = ((leads ?? []) as LeadRow[]).map((l) => l.id);
+  if (visibleLeadIds.length > 0) {
+    const { data: notes } = await supabase
+      .from("meeting_notes")
+      .select("lead_id, related_approval_id")
+      .in("lead_id", visibleLeadIds);
+    const approvalIds = ((notes ?? []) as Array<{ lead_id: string; related_approval_id: string | null }>)
+      .map((n) => n.related_approval_id)
+      .filter((id): id is string => !!id);
+    if (approvalIds.length > 0) {
+      const { data: approvedProposals } = await supabase
+        .from("approvals")
+        .select("id, status")
+        .in("id", approvalIds)
+        .eq("status", "approved");
+      const approvedIds = new Set(
+        ((approvedProposals ?? []) as Array<{ id: string }>).map((a) => a.id),
+      );
+      for (const n of (notes ?? []) as Array<{ lead_id: string; related_approval_id: string | null }>) {
+        if (n.related_approval_id && approvedIds.has(n.related_approval_id)) {
+          leadIdsWithSentProposal.add(n.lead_id);
+        }
+      }
+    }
+  }
 
   // Distinct sales-process stages across the loaded clients — used to
   // populate the filter dropdown. Order is preserved from the first client
@@ -188,7 +219,7 @@ export default async function LeadsPage({
                   <TableHead>Contact</TableHead>
                   <TableHead>Title</TableHead>
                   <TableHead>Process stage</TableHead>
-                  <TableHead>{showApprovalColumn ? "Decide" : "Approval"}</TableHead>
+                  <TableHead>{showApprovalColumn ? "Decide" : "Status"}</TableHead>
                   <TableHead>Last contact</TableHead>
                   <TableHead className="text-right">Value</TableHead>
                 </TableRow>
@@ -198,6 +229,15 @@ export default async function LeadsPage({
                   const stages = (l.client_id && stagesByClient.get(l.client_id)) || [];
                   const inferredStageId =
                     l.process_stage_id ?? inferProcessStageFromLeadStage(l.stage, stages);
+                  const currentStage = inferredStageId
+                    ? stages.find((s) => s.id === inferredStageId) ?? null
+                    : null;
+                  const status = computeLeadStatus({
+                    approvalStatus: l.approval_status,
+                    leadStage: l.stage,
+                    currentStage,
+                    proposalSent: leadIdsWithSentProposal.has(l.id),
+                  });
                   return (
                     <TableRow key={l.id}>
                       <TableCell>
@@ -222,7 +262,7 @@ export default async function LeadsPage({
                             status={l.approval_status}
                           />
                         ) : (
-                          <ApprovalBadge status={l.approval_status} />
+                          <LeadStatusPill status={status} />
                         )}
                       </TableCell>
                       <TableCell>{formatDate(l.last_contacted_at)}</TableCell>

@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth";
 import { logEvent } from "@/lib/events";
 import { actionError, type ActionResult } from "@/lib/actions";
+import { resend, FROM_EMAIL } from "@/lib/resend";
 import type {
   Approval,
   LeadListPayload,
@@ -177,6 +178,141 @@ export async function rejectApproval(input: unknown): Promise<ActionResult> {
     revalidatePath("/dashboard");
     revalidatePath("/playbooks");
     return { ok: true };
+  } catch (err) {
+    return actionError(err);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Proposal review decisions (post-meeting drafted email)
+// ──────────────────────────────────────────────────────────────────────────
+
+const ProposalReviewSchema = z.object({
+  approval_id: z.string().uuid(),
+  /** Optional HOS edits — if supplied, override the AI draft. */
+  edited_subject: z.string().min(1).max(200).optional(),
+  edited_body: z.string().min(1).max(20000).optional(),
+});
+
+/**
+ * HOS approves a proposal_review approval. Sends the (possibly edited)
+ * proposal email via Resend to the lead, records an outbound email row,
+ * marks the approval approved. Used by the Approve & Send button on the
+ * proposal_review card.
+ */
+export async function approveProposalReview(
+  input: unknown,
+): Promise<ActionResult<{ email_id: string | null }>> {
+  try {
+    const user = await requireUser();
+    const parsed = ProposalReviewSchema.safeParse(input);
+    if (!parsed.success) return { ok: false, error: "Invalid input" };
+    const supabase = createClient();
+
+    const { data: apprRow } = await supabase
+      .from("approvals")
+      .select("*")
+      .eq("id", parsed.data.approval_id)
+      .maybeSingle();
+    if (!apprRow) return { ok: false, error: "Approval not found" };
+    const approval = apprRow as Approval;
+    if (approval.type !== "proposal_review") {
+      return { ok: false, error: "Not a proposal_review approval" };
+    }
+    if (approval.status !== "pending") {
+      return { ok: false, error: `Already ${approval.status}` };
+    }
+
+    const payload = (approval.payload ?? {}) as Partial<{
+      meeting_note_id: string;
+      drafted_subject: string;
+      drafted_body: string;
+    }>;
+    const subject = parsed.data.edited_subject ?? payload.drafted_subject ?? "";
+    const body = parsed.data.edited_body ?? payload.drafted_body ?? "";
+    if (!subject || !body) {
+      return { ok: false, error: "Subject and body are required to send." };
+    }
+    if (!payload.meeting_note_id) {
+      return { ok: false, error: "Approval has no meeting_note reference" };
+    }
+
+    // Find the lead via the meeting_note
+    const { data: noteRow } = await supabase
+      .from("meeting_notes")
+      .select("lead_id, client_id, leads(email, company_name, contact_name)")
+      .eq("id", payload.meeting_note_id)
+      .maybeSingle();
+    const note = noteRow as
+      | {
+          lead_id: string;
+          client_id: string | null;
+          leads: { email: string | null; company_name: string; contact_name: string | null } | null;
+        }
+      | null;
+    if (!note?.leads?.email) {
+      return { ok: false, error: "Lead has no email address — cannot send." };
+    }
+
+    // Send via Resend
+    let resendId: string | null = null;
+    try {
+      const result = await resend.emails.send({
+        from: FROM_EMAIL,
+        to: note.leads.email,
+        subject,
+        text: body,
+        replyTo: FROM_EMAIL,
+      });
+      if (result.error) throw new Error(result.error.message);
+      resendId = result.data?.id ?? null;
+    } catch (sendErr) {
+      const msg = sendErr instanceof Error ? sendErr.message : String(sendErr);
+      return { ok: false, error: `Resend send failed: ${msg}` };
+    }
+
+    // Record the outbound email + mark approval approved
+    const now = new Date().toISOString();
+    const { data: emailRow } = await supabase
+      .from("emails")
+      .insert({
+        lead_id: note.lead_id,
+        client_id: note.client_id,
+        direction: "outbound" as const,
+        subject,
+        body,
+        status: "sent" as const,
+        sent_at: now,
+        resend_message_id: resendId,
+      })
+      .select("id")
+      .single();
+
+    await supabase
+      .from("approvals")
+      .update({
+        status: "approved",
+        approved_by: user.auth.id,
+        decided_at: now,
+      })
+      .eq("id", approval.id);
+
+    await logEvent({
+      event_type: "email_sent",
+      lead_id: note.lead_id,
+      client_id: note.client_id,
+      payload: {
+        kind: "proposal_sent",
+        approval_id: approval.id,
+        meeting_note_id: payload.meeting_note_id,
+        subject,
+      },
+    });
+
+    revalidatePath("/approvals");
+    revalidatePath(`/leads/${note.lead_id}`);
+    revalidatePath("/dashboard");
+    return { ok: true, email_id: (emailRow as { id?: string } | null)?.id ?? null };
   } catch (err) {
     return actionError(err);
   }
