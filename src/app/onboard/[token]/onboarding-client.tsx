@@ -81,7 +81,10 @@ export function OnboardingClient(props: {
   );
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
-  const [warning, setWarning] = useState<string | null>(null);
+  // Note: server-side warnings (e.g. "AI fallback used") are no longer
+  // surfaced in the UI. They're still attached to the API responses and
+  // logged via logEvent so HOS can see them — but a public client-facing
+  // onboarding page shouldn't expose internal AI plumbing to the contact.
 
   // ────────────────────────────────────────────────────────────────────
   // Welcome → start
@@ -134,7 +137,6 @@ export function OnboardingClient(props: {
         return;
       }
       setError(null);
-      setWarning(null);
       const userMsg = { role: "user" as const, topic: currentQ.topic, text: ans };
       setTranscript((t) => [...t, userMsg]);
       setDraftAnswer("");
@@ -157,7 +159,7 @@ export function OnboardingClient(props: {
           setError(json?.error ?? "Something went wrong saving your answer.");
           return;
         }
-        if (json.next_question.warning) setWarning(json.next_question.warning);
+        // (warning intentionally not surfaced — see top of component)
         setCurrentQ(json.next_question);
         setTranscript((t) => [
           ...t,
@@ -178,7 +180,6 @@ export function OnboardingClient(props: {
       )
         return;
       setError(null);
-      setWarning(null);
       setStage({ kind: "generating" });
       start(async () => {
         const res = await fetch(`/api/onboarding/${props.token}/complete`, {
@@ -197,7 +198,7 @@ export function OnboardingClient(props: {
           setStage({ kind: "interview" });
           return;
         }
-        if (json.warning) setWarning(json.warning);
+        // (warning intentionally not surfaced — see top of component)
         setPlaybook(json.playbook);
         setStage({ kind: "playbook" });
       });
@@ -214,9 +215,6 @@ export function OnboardingClient(props: {
               <ChatBubble role="assistant" text="…" muted />
             )}
           </div>
-          {warning && (
-            <Alert className="mt-3 border-amber-300 bg-amber-50 text-amber-900">{warning}</Alert>
-          )}
           {error && (
             <Alert variant="destructive" className="mt-3">
               {error}
@@ -320,7 +318,6 @@ export function OnboardingClient(props: {
         return;
       }
       setError(null);
-      setWarning(null);
       setStage({ kind: "regenerating" });
       start(async () => {
         const res = await fetch(`/api/onboarding/${props.token}/feedback`, {
@@ -340,7 +337,7 @@ export function OnboardingClient(props: {
           setStage({ kind: "playbook" });
           return;
         }
-        if (json.warning) setWarning(json.warning);
+        // (warning intentionally not surfaced — see top of component)
         setPlaybook(json.playbook);
         setFeedbackRounds((r) => [
           ...r,
@@ -381,9 +378,6 @@ export function OnboardingClient(props: {
             </div>
           </div>
 
-          {warning && (
-            <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-900">{warning}</Alert>
-          )}
           {error && (
             <Alert variant="destructive" className="mb-4">
               {error}
