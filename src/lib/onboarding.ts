@@ -89,24 +89,34 @@ export const CORE_TOPICS: CoreTopic[] = [
 ];
 
 export type InterviewState = {
-  /** Topics that have at least one substantive answer (>30 chars). */
+  /** Topics that have already had a question sent (regardless of answer
+   *  quality). Used to drive forward motion — each topic is asked exactly
+   *  once. */
+  asked_topic_ids: string[];
+  /** Topics that have at least one substantive answer (>30 chars). Used
+   *  for telemetry / future heuristics; not currently consulted by the
+   *  topic-picker since the user requested strict forward motion. */
   covered_topic_ids: string[];
-  /** Next topic the interview should focus on. null if all covered. */
+  /** First CORE_TOPIC that hasn't been asked yet. null when every topic
+   *  has been covered. */
   next_topic: CoreTopic | null;
-  /** True when every core topic has been touched. */
+  /** True when every core topic has been asked. */
   ready_to_complete: boolean;
-  /** Number of turns so far. */
+  /** Number of Q+A turns so far. */
   turn_count: number;
 };
 
 export function deriveInterviewState(answers: OnboardingAnswers): InterviewState {
   const turns = answers.questions ?? [];
+  const asked = new Set<string>();
   const covered = new Set<string>();
   for (const t of turns) {
+    asked.add(t.topic);
     if ((t.answer ?? "").trim().length >= 30) covered.add(t.topic);
   }
-  const next = CORE_TOPICS.find((t) => !covered.has(t.id)) ?? null;
+  const next = CORE_TOPICS.find((t) => !asked.has(t.id)) ?? null;
   return {
+    asked_topic_ids: Array.from(asked),
     covered_topic_ids: Array.from(covered),
     next_topic: next,
     ready_to_complete: next === null,
@@ -122,12 +132,22 @@ export type NextQuestion = {
 };
 
 /**
- * Ask Claude for the next question. Strategy:
- *   • If the most recent answer was substantive but the topic deserves
- *     deeper digging, return a follow-up on the same topic.
- *   • Otherwise advance to the next uncovered topic.
- *   • If every topic is covered, mark `ready_to_complete: true` and return
- *     a wrap-up prompt asking the contact to confirm they're done.
+ * Generate the next question for the contact.
+ *
+ * Strict forward motion: each CORE_TOPIC is asked at most once. The next
+ * topic is deterministically picked (first un-asked topic in CORE_TOPICS
+ * order) — Claude is NOT allowed to choose a different topic, only to
+ * phrase the chosen-topic question contextually given the full prior
+ * conversation.
+ *
+ * Claude receives the COMPLETE Q+A transcript (no truncation) plus an
+ * explicit list of every question already asked, with a hard "DO NOT
+ * REPEAT" guardrail. If Claude returns something that even fuzzy-matches
+ * an existing question, we fall back to the topic's seed question so the
+ * interview can never loop.
+ *
+ * If every topic has been asked, returns the wrap-up prompt without
+ * touching the API.
  */
 export async function generateNextQuestion(args: {
   client: Pick<Client, "name">;
@@ -137,7 +157,7 @@ export async function generateNextQuestion(args: {
   const state = deriveInterviewState(answers);
   const turns = answers.questions ?? [];
 
-  // Wrap-up case (skip Claude — deterministic).
+  // Wrap-up — deterministic, no Claude call.
   if (state.ready_to_complete) {
     return {
       topic: "wrap_up",
@@ -146,54 +166,56 @@ export async function generateNextQuestion(args: {
     };
   }
 
-  // First question (no turns yet) — open with the first topic seed.
-  if (turns.length === 0) {
-    const t = state.next_topic!;
-    return { topic: t.id, question: t.seed_question, ready_to_complete: false };
-  }
+  // The next topic is locked in by the deterministic state — Claude never
+  // gets to pick. This is the core fix for the repetition bug: there's no
+  // way for Claude to re-ask "differentiation" once it's been asked.
+  const targetTopic = state.next_topic!;
 
-  // Claude picks: follow-up on the last topic, or pivot to next.
+  // First turn or no API key → use the seed question verbatim.
+  if (turns.length === 0) {
+    return { topic: targetTopic.id, question: targetTopic.seed_question, ready_to_complete: false };
+  }
   if (isAnthropicKeyMissing()) {
-    const t = state.next_topic!;
     return {
-      topic: t.id,
-      question: t.seed_question,
+      topic: targetTopic.id,
+      question: targetTopic.seed_question,
       ready_to_complete: false,
       warning: ANTHROPIC_KEY_MISSING_MESSAGE,
     };
   }
 
-  const last = turns[turns.length - 1];
-  const lastTopic = CORE_TOPICS.find((t) => t.id === last.topic) ?? null;
-  const lastTopicCovered = state.covered_topic_ids.includes(last.topic);
-  const remaining = CORE_TOPICS.filter((t) => !state.covered_topic_ids.includes(t.id));
+  // Build the full transcript and the explicit list of asked questions.
+  // The transcript is NEVER truncated — Claude needs the complete history
+  // to (a) tailor the next question to what's already been said and
+  // (b) avoid repeating itself.
+  const transcriptBlock = turns
+    .map((t, i) => `Turn ${i + 1} [${t.topic}]\nQ: ${t.question}\nA: ${t.answer}`)
+    .join("\n\n");
+  const askedQuestionsBlock = turns
+    .map((t, i) => `${i + 1}. ${t.question}`)
+    .join("\n");
 
-  const system = `You are conducting a brief, warm, intelligent onboarding interview for a B2B sales-system platform. You ask ONE question at a time. Each question is short (1-2 sentences max), specific, and shows you read the previous answer. You alternate between digging deeper on the current topic when the answer needs more substance, and pivoting to the next topic when the current one is covered. Never list multiple questions. Never use lists. Never repeat questions. The contact is a real busy founder/operator — respect their time.`;
+  const system = `You are conducting a brief, warm, intelligent onboarding interview for a B2B sales-system platform. You ask ONE question at a time. Each question is short (1-2 sentences max), specific, and shows you read prior answers. Never list multiple questions. Never use lists. Never repeat or rephrase a question that has already been asked. The contact is a busy founder/operator — respect their time.`;
 
   const prompt = `Client company: ${client.name}
 
-Recent turns (most recent last):
-${turns
-  .slice(-6)
-  .map((t) => `[${t.topic}] Q: ${t.question}\nA: ${t.answer}`)
-  .join("\n\n")}
+FULL CONVERSATION SO FAR
+${transcriptBlock}
 
-Last topic covered well? ${lastTopicCovered ? "Yes — pivot to a new topic." : "Not yet — consider one focused follow-up."}
+QUESTIONS ALREADY ASKED — DO NOT repeat, rephrase, or ask a near-duplicate of any of these:
+${askedQuestionsBlock}
 
-Topics still to cover (in priority order):
-${remaining.map((t) => `- ${t.id}: ${t.label}`).join("\n")}
+NEXT TOPIC TO COVER (locked in — you do not get to choose a different topic):
+- id: ${targetTopic.id}
+- label: ${targetTopic.label}
+- default seed question: ${targetTopic.seed_question}
 
-Pick ONE next move:
-  - "deeper" on topic ${last.topic} (only if the last answer left an obvious gap, e.g. vague, missing detail, opens an interesting thread)
-  - "pivot" to one of the uncovered topics
+Your job: write ONE conversational question for the topic above, informed by the prior answers (reference them where it makes the question feel earned), but distinct from every previously asked question. If you can't improve on the seed question, return the seed question verbatim — that's fine.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON, no markdown:
 {
-  "topic": "<topic id from CORE_TOPICS or last.topic>",
-  "question": "<your single conversational question>"
-}
-
-The question opens conversationally (not "What is..."). It can reference the previous answer. Keep it under 200 characters.`;
+  "question": "<your single conversational question, under 240 characters>"
+}`;
 
   try {
     const response = await anthropic.messages.create({
@@ -203,21 +225,30 @@ The question opens conversationally (not "What is..."). It can reference the pre
       messages: [{ role: "user", content: prompt }],
     });
     const text = response.content[0]?.type === "text" ? response.content[0].text : "";
-    const parsed = parseJsonResponse<{ topic?: string; question?: string }>(text);
-    const topicId =
-      (parsed.topic && CORE_TOPICS.find((t) => t.id === parsed.topic)?.id) ??
-      lastTopic?.id ??
-      state.next_topic!.id;
-    if (!parsed.question) {
-      const fallback = state.next_topic ?? CORE_TOPICS[0];
-      return { topic: fallback.id, question: fallback.seed_question, ready_to_complete: false };
+    const parsed = parseJsonResponse<{ question?: string }>(text);
+    const candidate = (parsed.question ?? "").trim();
+
+    // Hard guardrail: if Claude's question is empty OR fuzzy-matches any
+    // already-asked question (case-insensitive, punctuation-stripped),
+    // fall back to the seed question. Better to repeat the seed than to
+    // loop the same Claude-paraphrased question twice.
+    if (!candidate || isDuplicateQuestion(candidate, turns)) {
+      return {
+        topic: targetTopic.id,
+        question: targetTopic.seed_question,
+        ready_to_complete: false,
+      };
     }
-    return { topic: topicId, question: parsed.question.slice(0, 500), ready_to_complete: false };
-  } catch (err) {
-    const fallback = state.next_topic ?? CORE_TOPICS[0];
+
     return {
-      topic: fallback.id,
-      question: fallback.seed_question,
+      topic: targetTopic.id,
+      question: candidate.slice(0, 500),
+      ready_to_complete: false,
+    };
+  } catch (err) {
+    return {
+      topic: targetTopic.id,
+      question: targetTopic.seed_question,
       ready_to_complete: false,
       warning: isAnthropicUnavailableError(err)
         ? ANTHROPIC_KEY_MISSING_MESSAGE
@@ -226,6 +257,40 @@ The question opens conversationally (not "What is..."). It can reference the pre
           : String(err),
     };
   }
+}
+
+/** Strip punctuation + lowercase to compare two question strings. */
+function normalizeQuestion(q: string): string {
+  return q
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Heuristic dup check: any prior question whose normalized form shares
+ *  ≥75% of the candidate's tokens (or vice versa) is treated as a repeat. */
+function isDuplicateQuestion(
+  candidate: string,
+  turns: OnboardingAnswer[],
+): boolean {
+  const cand = normalizeQuestion(candidate);
+  if (cand.length === 0) return false;
+  const candTokens = new Set(cand.split(" ").filter((w) => w.length > 2));
+  if (candTokens.size === 0) return false;
+
+  for (const t of turns) {
+    const prior = normalizeQuestion(t.question);
+    if (!prior) continue;
+    if (cand === prior) return true;
+    const priorTokens = new Set(prior.split(" ").filter((w) => w.length > 2));
+    if (priorTokens.size === 0) continue;
+    let overlap = 0;
+    for (const w of candTokens) if (priorTokens.has(w)) overlap++;
+    const smaller = Math.min(candTokens.size, priorTokens.size);
+    if (smaller > 0 && overlap / smaller >= 0.75) return true;
+  }
+  return false;
 }
 
 export type GeneratedPlaybookResult = {
