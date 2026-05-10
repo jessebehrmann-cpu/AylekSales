@@ -97,33 +97,38 @@ export default async function LeadsPage({
   const activeFilter = searchParams.client && clients?.find((c) => c.id === searchParams.client)?.name;
   const showApprovalColumn = !!searchParams.approval;
 
-  // Build a Set<leadId> of leads that have an approved proposal_review
-  // approval — used by the Status column to surface "Proposal sent". Two
-  // joins: proposal_review approvals → meeting_notes (via payload->>meeting_note_id)
-  // → lead_id. We only care about approvals with status='approved'.
+  // Build two Sets keyed by lead_id, one per proposal_review state, so the
+  // Status column can show "Proposal sent" (approved) vs "Proposal pending
+  // review" (still pending). Two joins: meeting_notes -> approvals (via
+  // related_approval_id) — done in one round trip per lookup type.
   const leadIdsWithSentProposal = new Set<string>();
+  const leadIdsWithPendingProposal = new Set<string>();
   const visibleLeadIds = ((leads ?? []) as LeadRow[]).map((l) => l.id);
   if (visibleLeadIds.length > 0) {
     const { data: notes } = await supabase
       .from("meeting_notes")
       .select("lead_id, related_approval_id")
       .in("lead_id", visibleLeadIds);
-    const approvalIds = ((notes ?? []) as Array<{ lead_id: string; related_approval_id: string | null }>)
+    const noteRows = (notes ?? []) as Array<{
+      lead_id: string;
+      related_approval_id: string | null;
+    }>;
+    const approvalIds = noteRows
       .map((n) => n.related_approval_id)
       .filter((id): id is string => !!id);
     if (approvalIds.length > 0) {
-      const { data: approvedProposals } = await supabase
+      const { data: proposalApprovals } = await supabase
         .from("approvals")
         .select("id, status")
-        .in("id", approvalIds)
-        .eq("status", "approved");
-      const approvedIds = new Set(
-        ((approvedProposals ?? []) as Array<{ id: string }>).map((a) => a.id),
+        .in("id", approvalIds);
+      const statusById = new Map(
+        ((proposalApprovals ?? []) as Array<{ id: string; status: string }>).map((a) => [a.id, a.status] as const),
       );
-      for (const n of (notes ?? []) as Array<{ lead_id: string; related_approval_id: string | null }>) {
-        if (n.related_approval_id && approvedIds.has(n.related_approval_id)) {
-          leadIdsWithSentProposal.add(n.lead_id);
-        }
+      for (const n of noteRows) {
+        if (!n.related_approval_id) continue;
+        const status = statusById.get(n.related_approval_id);
+        if (status === "approved") leadIdsWithSentProposal.add(n.lead_id);
+        else if (status === "pending") leadIdsWithPendingProposal.add(n.lead_id);
       }
     }
   }
@@ -237,6 +242,7 @@ export default async function LeadsPage({
                     leadStage: l.stage,
                     currentStage,
                     proposalSent: leadIdsWithSentProposal.has(l.id),
+                    proposalPending: leadIdsWithPendingProposal.has(l.id),
                   });
                   return (
                     <TableRow key={l.id}>

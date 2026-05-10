@@ -7,20 +7,27 @@ import { isHumanStage } from "@/lib/playbook-defaults";
  *
  * Replaces the raw approval_status badge with a status that reads as a
  * single deal-state. Priority order (first match wins):
- *   1. Lost           — lead.stage in (lost, unsubscribed) OR approval_status = rejected
- *   2. Won            — lead.stage = won
- *   3. Pending review — approval_status = pending_approval
- *   4. Proposal sent  — a proposal_review approval for this lead has status='approved'
- *   5. Awaiting human — current process stage agent === 'human'
- *   6. Active         — default (approved + agent-owned stage)
+ *
+ *   1. Lost                    — leadStage in (lost, unsubscribed) OR rejected
+ *   2. Won                     — leadStage = won
+ *   3. Pending review          — approval_status = pending_approval
+ *   4. Awaiting human          — current process stage owner = human
+ *   5. Proposal sent           — proposal_review approval is approved
+ *   6. Proposal pending review — proposal_review approval is pending
+ *   7. Active                  — default fallback
+ *
+ * Both proposal-related buckets are derived from the leadIdsWithSentProposal
+ * + leadIdsWithPendingProposal Sets pre-fetched on the leads list page so
+ * we don't N+1 the approvals table per row.
  */
 
 export type ComputedStatus =
   | "lost"
   | "won"
   | "pending_review"
-  | "proposal_sent"
   | "awaiting_human"
+  | "proposal_sent"
+  | "proposal_pending_review"
   | "active";
 
 export function computeLeadStatus(args: {
@@ -28,38 +35,70 @@ export function computeLeadStatus(args: {
   leadStage: LeadStage;
   currentStage: SalesProcessStage | null;
   proposalSent: boolean;
+  proposalPending: boolean;
 }): ComputedStatus {
-  const { approvalStatus, leadStage, currentStage, proposalSent } = args;
-  if (leadStage === "lost" || leadStage === "unsubscribed" || approvalStatus === "rejected") {
+  const {
+    approvalStatus,
+    leadStage,
+    currentStage,
+    proposalSent,
+    proposalPending,
+  } = args;
+
+  // 1. Lost
+  if (
+    leadStage === "lost" ||
+    leadStage === "unsubscribed" ||
+    approvalStatus === "rejected"
+  ) {
     return "lost";
   }
+  // 2. Won
   if (leadStage === "won") return "won";
+  // 3. Pending review (HOS hasn't approved the lead-list batch yet)
   if (approvalStatus === "pending_approval") return "pending_review";
-  if (proposalSent) return "proposal_sent";
+  // 4. Awaiting human — playbook's current-stage owner is `human`
   if (currentStage && isHumanStage(currentStage.agent)) return "awaiting_human";
+  // 5. Proposal sent (HOS approved + Resend dispatched)
+  if (proposalSent) return "proposal_sent";
+  // 6. Proposal pending review (post-meeting draft awaiting HOS)
+  if (proposalPending) return "proposal_pending_review";
+  // 7. Default
   return "active";
 }
 
-const META: Record<
-  ComputedStatus,
-  { label: string; variant: "warning" | "success" | "destructive" | "default" | "muted"; klass?: string }
-> = {
-  lost: { label: "Lost", variant: "destructive" },
-  won: { label: "Won", variant: "success" },
-  pending_review: { label: "Pending review", variant: "warning" },
+const META: Record<ComputedStatus, { label: string; klass: string }> = {
+  lost: {
+    label: "Lost",
+    klass: "border-transparent bg-rose-100 text-rose-800",
+  },
+  won: {
+    label: "Won",
+    klass: "border-transparent bg-emerald-100 text-emerald-800",
+  },
+  pending_review: {
+    label: "Pending review",
+    klass: "border-transparent bg-amber-100 text-amber-900",
+  },
+  awaiting_human: {
+    label: "Awaiting human",
+    klass: "border-transparent bg-amber-100 text-amber-900",
+  },
   proposal_sent: {
     label: "Proposal sent",
-    variant: "default",
     klass: "border-transparent bg-blue-100 text-blue-800",
   },
-  awaiting_human: { label: "Awaiting human", variant: "warning" },
-  active: { label: "Active", variant: "success" },
+  proposal_pending_review: {
+    label: "Proposal pending review",
+    klass: "border-transparent bg-amber-100 text-amber-900",
+  },
+  active: {
+    label: "Active",
+    klass: "border-transparent bg-emerald-100 text-emerald-800",
+  },
 };
 
 export function LeadStatusPill({ status }: { status: ComputedStatus }) {
   const meta = META[status];
-  if (meta.klass) {
-    return <Badge className={meta.klass}>{meta.label}</Badge>;
-  }
-  return <Badge variant={meta.variant}>{meta.label}</Badge>;
+  return <Badge className={meta.klass}>{meta.label}</Badge>;
 }
