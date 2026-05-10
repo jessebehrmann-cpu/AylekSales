@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { logEvent } from "@/lib/events";
 import type {
   GeneratedPlaybookDraft,
+  OnboardingSectionId,
   OnboardingSession,
   PlaybookApprovalPayload,
 } from "@/lib/supabase/types";
@@ -42,6 +43,29 @@ export async function POST(
   if (!session.generated_playbook) {
     return NextResponse.json(
       { ok: false, error: "No playbook to approve — complete the interview first." },
+      { status: 400 },
+    );
+  }
+
+  // Gate: every section must be marked approved by the contact via the
+  // section-by-section review flow before the playbook gets written and
+  // the HOS approval is created.
+  const REQUIRED_SECTIONS: OnboardingSectionId[] = [
+    "icp",
+    "strategy",
+    "voice_tone",
+    "sequences",
+    "sales_process",
+  ];
+  const sectionApprovals = session.answers?.section_approvals ?? {};
+  const missing = REQUIRED_SECTIONS.filter((s) => sectionApprovals[s] !== true);
+  if (missing.length > 0) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "All sections must be approved before the playbook can be submitted.",
+        missing_sections: missing,
+      },
       { status: 400 },
     );
   }

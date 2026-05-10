@@ -46,6 +46,7 @@ export default async function OnboardingPage({
       initialPlaybook={session.generated_playbook}
       initialFeedbackRounds={session.feedback_rounds ?? []}
       initialQuestion={initialQuestion}
+      initialSectionApprovals={session.answers?.section_approvals ?? {}}
       coreTopics={CORE_TOPICS}
     />
   );

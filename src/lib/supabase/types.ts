@@ -513,17 +513,34 @@ export type OnboardingAnswer = {
   asked_at: string;
 };
 
+/** The five reviewable playbook sections in order. The contact approves
+ *  each one independently before the playbook is written. */
+export type OnboardingSectionId =
+  | "icp"
+  | "strategy"
+  | "voice_tone"
+  | "sequences"
+  | "sales_process";
+
 export type OnboardingAnswers = {
   questions?: OnboardingAnswer[];
   /** Free-form notes the contact added at the end. */
   notes?: string;
   /** Set when the contact has clicked "I'm done" — terminates the loop. */
   done?: boolean;
+  /** Per-section client approvals. The whole-playbook write only happens
+   *  when every section is true. */
+  section_approvals?: Partial<Record<OnboardingSectionId, boolean>>;
 };
 
 export type OnboardingFeedbackRound = {
   requested_at: string;
   feedback: string;
+  /** When set, this round was a single-section regeneration. */
+  section?: OnboardingSectionId;
+  /** Snapshot of just the section being changed (when section is set). */
+  prior_section?: unknown;
+  /** Snapshot of the entire playbook (when this was a whole-playbook regen). */
   prior_playbook: GeneratedPlaybookDraft | null;
 };
 

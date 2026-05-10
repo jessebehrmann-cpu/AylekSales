@@ -27,6 +27,7 @@ import type {
   OnboardingAnswer,
   OnboardingAnswers,
   OnboardingFeedbackRound,
+  OnboardingSectionId,
 } from "@/lib/supabase/types";
 import { DEFAULT_SALES_PROCESS } from "@/lib/playbook-defaults";
 
@@ -195,11 +196,11 @@ export async function generateNextQuestion(args: {
     .map((t, i) => `${i + 1}. ${t.question}`)
     .join("\n");
 
-  const system = `You are conducting a brief, warm, intelligent onboarding interview for a B2B sales-system platform. You ask ONE question at a time. Each question is short (1-2 sentences max), specific, and shows you read prior answers. Never list multiple questions. Never use lists. Never repeat or rephrase a question that has already been asked. The contact is a busy founder/operator — respect their time.`;
+  const system = `You are a senior B2B sales strategist conducting a warm, intelligent onboarding interview for a real founder/operator. You have deep working knowledge of the contact's industry — your knowledge sharpens with every answer they give. You ask ONE question at a time. Every question after the first OPENS by referencing a specific phrase, fact, or detail the contact has already said — not a generic "thanks for sharing" but an actual callback ("You mentioned restaurants and bars — …"). You ask the kind of question a great strategist would ask: one that surfaces an insight the contact may not have thought of, or sharpens an answer that was vague. Tone is warm, confident, expert. You never list multiple questions, never use lists, never repeat or rephrase a question that has already been asked, and you never sound like a generic form. Each question is 1-2 sentences and under 240 characters.`;
 
   const prompt = `Client company: ${client.name}
 
-FULL CONVERSATION SO FAR
+FULL CONVERSATION SO FAR (read every word — your next question must show you read it)
 ${transcriptBlock}
 
 QUESTIONS ALREADY ASKED — DO NOT repeat, rephrase, or ask a near-duplicate of any of these:
@@ -208,9 +209,9 @@ ${askedQuestionsBlock}
 NEXT TOPIC TO COVER (locked in — you do not get to choose a different topic):
 - id: ${targetTopic.id}
 - label: ${targetTopic.label}
-- default seed question: ${targetTopic.seed_question}
+- default seed question (use only if you genuinely can't write a sharper, more contextual one): ${targetTopic.seed_question}
 
-Your job: write ONE conversational question for the topic above, informed by the prior answers (reference them where it makes the question feel earned), but distinct from every previously asked question. If you can't improve on the seed question, return the seed question verbatim — that's fine.
+REQUIRED: open the question with an explicit callback to a specific phrase or fact from the conversation above (e.g. "You mentioned X — …"). Make it the kind of question a senior strategist would ask: it should sharpen what they said, surface a useful distinction, or draw out an insight they may not have considered. The question must focus on the locked-in topic above.
 
 Return ONLY valid JSON, no markdown:
 {
@@ -319,7 +320,18 @@ export async function generatePlaybookFromInterview(args: {
     };
   }
 
-  const system = `You are an expert B2B sales-system architect. You are given a transcript of an onboarding interview with a real founder/operator. You produce a complete, ready-to-run playbook in JSON, anchored on what they actually said. No invented facts. If they didn't answer a section, you use sensible defaults that match the rest of their answers and call it out in notes.
+  const system = `You are a senior B2B sales strategist AND a senior B2B copywriter who specializes in the contact's industry. You are given a transcript of an onboarding interview with a real founder/operator. You produce a single complete playbook that reads like it was custom-built for THIS client by someone who has worked in their space for years.
+
+Hard rules:
+- ICP must name SPECIFIC job titles and SPECIFIC company-type filters drawn directly from what the contact said. No generic titles like "Decision Maker" or vague company types.
+- strategy.value_proposition must use the contact's own framing of the problem they solve — pull their exact phrasing where it works.
+- strategy.key_messages must use the contact's stated differentiators verbatim where possible. No generic "we're better/faster/cheaper" language.
+- strategy.proof_points must reference specifics the contact gave (named verticals, named outcomes, named processes). If they didn't give any, leave the array empty rather than fabricate.
+- voice_tone must reflect EXACTLY how the contact described their own communication style. If they said "casual and direct, no corporate fluff," voice_tone reflects that — not a generic professional tone.
+- The 3-step email sequence must read like a senior copywriter who deeply knows their industry wrote it. NEVER use: "I hope this finds you well", "circling back", "just touching base", "synergy", "leverage", or any other template language. Every line must feel like it could only have been written for this specific client. Use the contact's own vocabulary. Reference the contact's industry by name if relevant.
+- sales_process conditions must reflect any explicit rules the contact stated. If they said "only book a meeting if the prospect explicitly asks," that EXACT rule goes in the relevant stage's condition. If no rule was stated for a stage, use null.
+- If the contact didn't cover something, use a sensible default that fits the rest of their answers AND call it out in notes.
+- NO INVENTED FACTS. If you can't anchor a field on a specific quote or fact from the transcript, leave it empty / use a minimal default and note the gap in notes.
 
 You ALWAYS return a single JSON object matching the exact schema requested. No markdown, no commentary.`;
 
@@ -528,4 +540,202 @@ export function appendFeedbackRound(
       prior_playbook: priorPlaybook,
     },
   ];
+}
+
+export function appendSectionFeedbackRound(
+  rounds: OnboardingFeedbackRound[],
+  feedback: string,
+  section: OnboardingSectionId,
+  priorSection: unknown,
+): OnboardingFeedbackRound[] {
+  return [
+    ...rounds,
+    {
+      requested_at: new Date().toISOString(),
+      feedback,
+      section,
+      prior_section: priorSection,
+      prior_playbook: null,
+    },
+  ];
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Section regeneration — used when a contact gives feedback on a single
+// section of the generated playbook in the section-by-section review flow.
+// ──────────────────────────────────────────────────────────────────────────
+
+const SECTION_LABELS: Record<OnboardingSectionId, string> = {
+  icp: "Ideal Customer Profile",
+  strategy: "Strategy & Key Messaging",
+  voice_tone: "Voice & Tone",
+  sequences: "Email Sequence",
+  sales_process: "Sales Process",
+};
+
+const SECTION_SCHEMA_HINTS: Record<OnboardingSectionId, string> = {
+  icp: `{
+  "industries": ["..."],
+  "company_size": "e.g. 50-500 employees",
+  "target_titles": ["..."],
+  "geography": ["..."],
+  "qualification_signal": "...",
+  "disqualifiers": ["..."]
+}`,
+  strategy: `{
+  "value_proposition": "1-2 sentences anchored on what the contact actually said.",
+  "key_messages": ["...", "...", "..."],
+  "proof_points": ["...", "..."],
+  "objection_responses": [{ "objection": "...", "response": "..." }]
+}`,
+  voice_tone: `{
+  "tone_descriptors": ["..."],
+  "writing_style": "...",
+  "avoid": ["..."],
+  "example_phrases": ["..."]
+}`,
+  sequences: `[
+  { "step": 1, "delay_days": 0, "subject": "...", "body": "..." },
+  { "step": 2, "delay_days": 3, "subject": "...", "body": "..." },
+  { "step": 3, "delay_days": 5, "subject": "...", "body": "..." }
+]`,
+  sales_process: `[
+  { "id": "prospect",        "name": "Prospect",        "description": "...", "agent": "prospect-01", "condition": null },
+  { "id": "outreach",        "name": "Outreach",        "description": "...", "agent": "outreach-01", "condition": null },
+  { "id": "book_meeting",    "name": "Book meeting",    "description": "...", "agent": "sales-01",    "condition": "..." },
+  { "id": "have_meeting",    "name": "Have meeting",    "description": "...", "agent": "human",       "condition": "..." },
+  { "id": "send_proposal",   "name": "Send proposal",   "description": "...", "agent": "sales-01",    "condition": "..." },
+  { "id": "execute_contract","name": "Execute contract","description": "...", "agent": "sales-01",    "condition": null },
+  { "id": "payment",         "name": "Payment",         "description": "...", "agent": "sales-01",    "condition": null },
+  { "id": "onboard",         "name": "Onboard",         "description": "...", "agent": "handover-01", "condition": null },
+  { "id": "handover",        "name": "Handover",        "description": "...", "agent": "handover-01", "condition": null }
+]`,
+};
+
+const SECTION_KEYS: OnboardingSectionId[] = [
+  "icp",
+  "strategy",
+  "voice_tone",
+  "sequences",
+  "sales_process",
+];
+
+export function isOnboardingSection(v: unknown): v is OnboardingSectionId {
+  return typeof v === "string" && (SECTION_KEYS as string[]).includes(v);
+}
+
+export function sectionLabel(s: OnboardingSectionId): string {
+  return SECTION_LABELS[s];
+}
+
+export function getSection(
+  playbook: GeneratedPlaybookDraft,
+  section: OnboardingSectionId,
+): unknown {
+  return playbook[section];
+}
+
+export function setSection(
+  playbook: GeneratedPlaybookDraft,
+  section: OnboardingSectionId,
+  value: unknown,
+): GeneratedPlaybookDraft {
+  return { ...playbook, [section]: value } as GeneratedPlaybookDraft;
+}
+
+export type SectionRegenResult = {
+  section: OnboardingSectionId;
+  content: unknown;
+  warning?: string;
+};
+
+/**
+ * Re-run Claude on a single playbook section using the contact's feedback.
+ * The model sees the full transcript + the entire current playbook (so it
+ * keeps cross-section consistency) and returns ONLY the requested
+ * section's JSON in its existing schema.
+ *
+ * On failure, returns the prior section unchanged with a warning so the
+ * UI can surface the issue to the contact.
+ */
+export async function regeneratePlaybookSection(args: {
+  client: Pick<Client, "name">;
+  answers: OnboardingAnswers;
+  currentPlaybook: GeneratedPlaybookDraft;
+  section: OnboardingSectionId;
+  feedback: string;
+}): Promise<SectionRegenResult> {
+  const { client, answers, currentPlaybook, section, feedback } = args;
+  const turns = answers.questions ?? [];
+
+  if (isAnthropicKeyMissing()) {
+    return {
+      section,
+      content: currentPlaybook[section],
+      warning: ANTHROPIC_KEY_MISSING_MESSAGE,
+    };
+  }
+
+  const system = `You are a senior B2B sales strategist AND a senior B2B copywriter who specializes in the contact's industry. The contact has given specific feedback on ONE section of their generated playbook. Rewrite ONLY that section to address their feedback while keeping it consistent with the rest of the playbook (which you also have for context).
+
+Hard rules apply (same as the full-playbook generator):
+- Anchor every field on a specific quote or fact from the transcript.
+- No invented facts. No template language. No "I hope this finds you well", "circling back", "synergy", etc.
+- Use the contact's own vocabulary and stated differentiators verbatim where possible.
+- For sequences/email content: write like a senior copywriter who specializes in the client's industry.
+- For sales_process conditions: reflect any explicit rules the contact stated.
+
+You ALWAYS return a single JSON object with exactly two keys: "section" (the section id, must equal the requested section) and "content" (the new value for that section, in the exact schema requested). No markdown, no commentary.`;
+
+  const userBlock = `CLIENT
+Company: ${client.name}
+
+INTERVIEW TRANSCRIPT (for full context — anchor changes on what they actually said)
+${turns
+    .map((t, i) => `${i + 1}. [${t.topic}] Q: ${t.question}\n   A: ${t.answer}`)
+    .join("\n\n")}
+
+${answers.notes ? `EXTRA NOTES FROM CONTACT\n${answers.notes}\n` : ""}
+
+CURRENT PLAYBOOK (you're rewriting only the "${section}" section — the rest stays as-is)
+${JSON.stringify(currentPlaybook, null, 2)}
+
+CONTACT'S FEEDBACK ON "${SECTION_LABELS[section]}"
+${feedback}
+
+REQUIRED: rewrite ONLY the "${section}" section. Address the feedback specifically. Keep the new section consistent with the rest of the playbook above. Use the schema:
+
+${SECTION_SCHEMA_HINTS[section]}
+
+Return ONLY this JSON shape (no markdown, no commentary):
+{ "section": "${section}", "content": <new section in the schema above> }`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 4000,
+      system,
+      messages: [{ role: "user", content: userBlock }],
+    });
+    const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const parsed = parseJsonResponse<{ section?: string; content?: unknown }>(text);
+    if (parsed.section !== section || parsed.content == null) {
+      return {
+        section,
+        content: currentPlaybook[section],
+        warning: "Claude returned an invalid shape — section unchanged.",
+      };
+    }
+    return { section, content: parsed.content };
+  } catch (err) {
+    return {
+      section,
+      content: currentPlaybook[section],
+      warning: isAnthropicUnavailableError(err)
+        ? ANTHROPIC_KEY_MISSING_MESSAGE
+        : err instanceof Error
+          ? err.message
+          : String(err),
+    };
+  }
 }

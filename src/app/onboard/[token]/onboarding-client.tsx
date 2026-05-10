@@ -1,15 +1,15 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert } from "@/components/ui/alert";
 import {
-  Send,
-  Sparkles,
+  ArrowRight,
   CheckCircle2,
   MessageSquare,
   RefreshCw,
+  Sparkles,
 } from "lucide-react";
 import type {
   CoreTopic,
@@ -19,17 +19,35 @@ import type {
   GeneratedPlaybookDraft,
   OnboardingAnswers,
   OnboardingFeedbackRound,
+  OnboardingSectionId,
   OnboardingStatus,
+  PlaybookSequenceStep,
   SalesProcessStage,
 } from "@/lib/supabase/types";
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stage machine + section schema
+// ─────────────────────────────────────────────────────────────────────────
 
 type Stage =
   | { kind: "welcome" }
   | { kind: "interview" }
   | { kind: "generating" }
-  | { kind: "playbook" }
-  | { kind: "regenerating" }
+  | { kind: "review"; sectionIdx: number }
+  | { kind: "submitting" }
   | { kind: "approved" };
+
+const SECTIONS: Array<{ id: OnboardingSectionId; label: string }> = [
+  { id: "icp", label: "Ideal Customer Profile" },
+  { id: "strategy", label: "Strategy & Key Messaging" },
+  { id: "voice_tone", label: "Voice & Tone" },
+  { id: "sequences", label: "Email Sequence" },
+  { id: "sales_process", label: "Sales Process" },
+];
+
+// ─────────────────────────────────────────────────────────────────────────
+// Main component
+// ─────────────────────────────────────────────────────────────────────────
 
 export function OnboardingClient(props: {
   token: string;
@@ -39,38 +57,32 @@ export function OnboardingClient(props: {
   initialPlaybook: GeneratedPlaybookDraft | null;
   initialFeedbackRounds: OnboardingFeedbackRound[];
   initialQuestion: NextQuestion | null;
+  initialSectionApprovals: Partial<Record<OnboardingSectionId, boolean>>;
   coreTopics: CoreTopic[];
 }) {
+  // Approval state — hydrated from server
+  const [sectionApprovals, setSectionApprovals] = useState<
+    Partial<Record<OnboardingSectionId, boolean>>
+  >(props.initialSectionApprovals);
+
+  // Pick initial stage:
+  //  - approved → done screen
+  //  - playbook_generated → resume on first un-approved section
+  //  - has answers → interview
+  //  - else → welcome
   const initialStage: Stage = (() => {
     if (props.initialStatus === "approved") return { kind: "approved" };
-    if (props.initialStatus === "playbook_generated") return { kind: "playbook" };
+    if (props.initialStatus === "playbook_generated" || props.initialPlaybook) {
+      const firstUnapproved = SECTIONS.findIndex(
+        (s) => props.initialSectionApprovals[s.id] !== true,
+      );
+      return { kind: "review", sectionIdx: firstUnapproved < 0 ? 0 : firstUnapproved };
+    }
     if ((props.initialAnswers.questions ?? []).length === 0) return { kind: "welcome" };
     return { kind: "interview" };
   })();
 
   const [stage, setStage] = useState<Stage>(initialStage);
-  const [transcript, setTranscript] = useState<
-    Array<{ role: "assistant" | "user"; topic: string; text: string }>
-  >(() => {
-    const turns = props.initialAnswers.questions ?? [];
-    const out: Array<{ role: "assistant" | "user"; topic: string; text: string }> = [];
-    for (const t of turns) {
-      out.push({ role: "assistant", topic: t.topic, text: t.question });
-      out.push({ role: "user", topic: t.topic, text: t.answer });
-    }
-    // Seed the first assistant turn whenever there's an initial question,
-    // regardless of stage. The welcome screen renders its own JSX so this
-    // doesn't show until the user clicks "Start the interview" — at which
-    // point the chat already has the question rendered above the input box.
-    if (props.initialQuestion) {
-      out.push({
-        role: "assistant",
-        topic: props.initialQuestion.topic,
-        text: props.initialQuestion.question,
-      });
-    }
-    return out;
-  });
   const [currentQ, setCurrentQ] = useState<NextQuestion | null>(props.initialQuestion);
   const [draftAnswer, setDraftAnswer] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -79,55 +91,60 @@ export function OnboardingClient(props: {
   const [feedbackRounds, setFeedbackRounds] = useState<OnboardingFeedbackRound[]>(
     props.initialFeedbackRounds,
   );
-  const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const [feedbackText, setFeedbackText] = useState("");
-  // Note: server-side warnings (e.g. "AI fallback used") are no longer
-  // surfaced in the UI. They're still attached to the API responses and
-  // logged via logEvent so HOS can see them — but a public client-facing
-  // onboarding page shouldn't expose internal AI plumbing to the contact.
 
-  // ────────────────────────────────────────────────────────────────────
-  // Welcome → start
-  // ────────────────────────────────────────────────────────────────────
+  // Track number of answered turns for the progress dots
+  const answeredCount = (props.initialAnswers.questions ?? []).length;
+  const [turnCount, setTurnCount] = useState<number>(answeredCount);
+
+  // Slide animation key — bump on every transition to retrigger fade-in.
+  const [slideKey, setSlideKey] = useState(0);
+
+  // Per-section feedback UI state
+  const [feedbackSection, setFeedbackSection] = useState<OnboardingSectionId | null>(null);
+  const [feedbackText, setFeedbackText] = useState("");
+  const [sectionRegenerating, setSectionRegenerating] = useState<OnboardingSectionId | null>(null);
+
+  function bumpSlide() {
+    setSlideKey((k) => k + 1);
+  }
+
+  // ───────────────────────────────────────────────────────────────────
+  // Welcome
+  // ───────────────────────────────────────────────────────────────────
   if (stage.kind === "welcome") {
     return (
-      <Shell clientName={props.clientName}>
-        <div className="mx-auto flex max-w-2xl flex-col gap-6 px-6 py-16 text-center">
-          <Sparkles className="mx-auto h-10 w-10 text-emerald-600" />
-          <div>
-            <h1 className="text-3xl font-semibold tracking-tight">
+      <Shell>
+        <SlideContainer slideKey={slideKey}>
+          <div className="mx-auto flex w-full max-w-2xl flex-col items-start gap-8">
+            <Sparkles className="h-8 w-8 text-primary" />
+            <h1 className="text-5xl font-semibold tracking-tight text-foreground">
               Welcome, {props.clientName}.
             </h1>
-            <p className="mt-3 text-base text-muted-foreground">
-              I&apos;m going to ask you a few short questions about your business and
-              how you sell. About 15 minutes. After that, I&apos;ll draft your sales
-              playbook end-to-end — ICP, messaging, voice, sequences, conditions
-              — and you&apos;ll review it before anything goes live.
+            <p className="text-lg text-muted-foreground">
+              I&apos;ll ask you 8 quick questions about your business and how
+              you sell — should take about 15 minutes. Then I&apos;ll draft your
+              full sales playbook and you can review it section by section
+              before anything goes live.
             </p>
+            <Button
+              size="lg"
+              onClick={() => {
+                setStage({ kind: "interview" });
+                bumpSlide();
+              }}
+              className="mt-2"
+            >
+              Start the interview <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
           </div>
-          <div className="rounded-lg border bg-muted/40 p-4 text-left text-sm text-muted-foreground">
-            <p className="font-medium text-foreground mb-2">What we&apos;ll cover</p>
-            <ul className="space-y-1.5">
-              {props.coreTopics.map((t) => (
-                <li key={t.id}>• {t.label}</li>
-              ))}
-            </ul>
-          </div>
-          <Button
-            size="lg"
-            onClick={() => setStage({ kind: "interview" })}
-            className="mx-auto"
-          >
-            Start the interview <Send className="ml-2 h-4 w-4" />
-          </Button>
-        </div>
+        </SlideContainer>
       </Shell>
     );
   }
 
-  // ────────────────────────────────────────────────────────────────────
-  // Interview chat
-  // ────────────────────────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────────────
+  // Interview — one question per slide
+  // ───────────────────────────────────────────────────────────────────
   if (stage.kind === "interview") {
     function submitAnswer() {
       if (!currentQ) return;
@@ -137,9 +154,6 @@ export function OnboardingClient(props: {
         return;
       }
       setError(null);
-      const userMsg = { role: "user" as const, topic: currentQ.topic, text: ans };
-      setTranscript((t) => [...t, userMsg]);
-      setDraftAnswer("");
       start(async () => {
         const res = await fetch(`/api/onboarding/${props.token}/answer`, {
           method: "POST",
@@ -159,16 +173,10 @@ export function OnboardingClient(props: {
           setError(json?.error ?? "Something went wrong saving your answer.");
           return;
         }
-        // (warning intentionally not surfaced — see top of component)
         setCurrentQ(json.next_question);
-        setTranscript((t) => [
-          ...t,
-          {
-            role: "assistant",
-            topic: json.next_question!.topic,
-            text: json.next_question!.question,
-          },
-        ]);
+        setDraftAnswer("");
+        setTurnCount((n) => n + 1);
+        bumpSlide();
       });
     }
 
@@ -181,6 +189,7 @@ export function OnboardingClient(props: {
         return;
       setError(null);
       setStage({ kind: "generating" });
+      bumpSlide();
       start(async () => {
         const res = await fetch(`/api/onboarding/${props.token}/complete`, {
           method: "POST",
@@ -191,111 +200,222 @@ export function OnboardingClient(props: {
           ok: boolean;
           error?: string;
           playbook?: GeneratedPlaybookDraft;
-          warning?: string | null;
         } | null;
         if (!json?.ok || !json.playbook) {
           setError(json?.error ?? "Failed to generate playbook.");
           setStage({ kind: "interview" });
           return;
         }
-        // (warning intentionally not surfaced — see top of component)
         setPlaybook(json.playbook);
-        setStage({ kind: "playbook" });
+        setStage({ kind: "review", sectionIdx: 0 });
+        bumpSlide();
       });
     }
 
+    const total = props.coreTopics.length;
+    // Each answered turn moves us forward; the current question fills slot
+    // (turnCount + 1).
+    const currentSlot = Math.min(turnCount + 1, total);
+
     return (
-      <Shell clientName={props.clientName}>
-        <div className="mx-auto flex h-screen max-w-3xl flex-col px-4 py-6">
-          <div className="flex-1 space-y-6 overflow-y-auto rounded-xl border bg-card p-6 shadow-sm">
-            {transcript.map((m, i) => (
-              <ChatBubble key={i} role={m.role} text={m.text} />
-            ))}
-            {pending && stage.kind === "interview" && (
-              <ChatBubble role="assistant" text="…" muted />
-            )}
-          </div>
-          {error && (
-            <Alert variant="destructive" className="mt-3">
-              {error}
-            </Alert>
-          )}
-          <div className="mt-3 rounded-xl border bg-card p-3 shadow-sm">
+      <Shell>
+        <ProgressDots current={currentSlot} total={total} />
+        <SlideContainer slideKey={slideKey}>
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
+            <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+              Question {currentSlot} of {total}
+            </p>
+            <h2 className="text-3xl font-semibold leading-tight tracking-tight text-foreground sm:text-4xl">
+              {currentQ?.question ?? "…"}
+            </h2>
             <Textarea
               value={draftAnswer}
               onChange={(e) => setDraftAnswer(e.target.value)}
               placeholder="Type your answer…"
-              rows={3}
+              rows={6}
+              autoFocus
               disabled={pending}
+              className="resize-none text-base leading-relaxed"
               onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   submitAnswer();
                 }
               }}
             />
-            <div className="mt-2 flex items-center justify-between">
-              <p className="text-[11px] text-muted-foreground">
-                ⌘/Ctrl + Enter to send · {transcript.length / 2 | 0} answers so
-                far
+            {error && (
+              <Alert variant="destructive">
+                {error}
+              </Alert>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                Enter to send · Shift + Enter for a new line
               </p>
               <div className="flex items-center gap-2">
                 {currentQ?.ready_to_complete && (
                   <Button
                     type="button"
                     variant="outline"
-                    size="sm"
                     onClick={imDone}
                     disabled={pending}
                   >
-                    <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" /> I&apos;m done
+                    <CheckCircle2 className="mr-1.5 h-4 w-4" /> I&apos;m done
                   </Button>
                 )}
-                <Button onClick={submitAnswer} disabled={pending || !draftAnswer.trim()} size="sm">
-                  Send <Send className="ml-1.5 h-3.5 w-3.5" />
+                <Button onClick={submitAnswer} disabled={pending || !draftAnswer.trim()}>
+                  {pending ? "Saving…" : "Next"}
+                  <ArrowRight className="ml-1.5 h-4 w-4" />
                 </Button>
               </div>
             </div>
           </div>
-        </div>
+        </SlideContainer>
       </Shell>
     );
   }
 
-  // ────────────────────────────────────────────────────────────────────
-  // Generating spinner
-  // ────────────────────────────────────────────────────────────────────
-  if (stage.kind === "generating" || stage.kind === "regenerating") {
+  // ───────────────────────────────────────────────────────────────────
+  // Generating
+  // ───────────────────────────────────────────────────────────────────
+  if (stage.kind === "generating") {
     return (
-      <Shell clientName={props.clientName}>
-        <div className="mx-auto flex max-w-xl flex-col items-center gap-4 px-6 py-24 text-center">
-          <RefreshCw className="h-10 w-10 animate-spin text-emerald-600" />
-          <h2 className="text-xl font-semibold">
-            {stage.kind === "regenerating"
-              ? "Updating your playbook…"
-              : "Drafting your sales playbook…"}
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Pulling everything you said into a complete playbook. This usually
-            takes 20-40 seconds.
-          </p>
-        </div>
+      <Shell>
+        <SlideContainer slideKey={slideKey}>
+          <div className="mx-auto flex max-w-xl flex-col items-center gap-6 text-center">
+            <RefreshCw className="h-10 w-10 animate-spin text-primary" />
+            <h2 className="text-2xl font-semibold tracking-tight">
+              Drafting your sales playbook…
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Pulling everything you said into a complete playbook custom-built
+              for {props.clientName}. Usually 20-40 seconds.
+            </p>
+          </div>
+        </SlideContainer>
       </Shell>
     );
   }
 
-  // ────────────────────────────────────────────────────────────────────
-  // Playbook display + approve / feedback
-  // ────────────────────────────────────────────────────────────────────
-  if (stage.kind === "playbook" && playbook) {
-    function approve() {
-      if (
-        !confirm(
-          "Approve this playbook? It goes to Aylek for final sign-off, then your sales agents go live.",
-        )
-      )
+  // ───────────────────────────────────────────────────────────────────
+  // Submitting (final) / Approved
+  // ───────────────────────────────────────────────────────────────────
+  if (stage.kind === "submitting") {
+    return (
+      <Shell>
+        <SlideContainer slideKey={slideKey}>
+          <div className="mx-auto flex max-w-xl flex-col items-center gap-6 text-center">
+            <RefreshCw className="h-10 w-10 animate-spin text-primary" />
+            <h2 className="text-2xl font-semibold tracking-tight">Submitting to Aylek…</h2>
+            <p className="text-sm text-muted-foreground">Almost there.</p>
+          </div>
+        </SlideContainer>
+      </Shell>
+    );
+  }
+  if (stage.kind === "approved") {
+    return (
+      <Shell>
+        <SlideContainer slideKey={slideKey}>
+          <div className="mx-auto flex max-w-xl flex-col items-center gap-6 text-center">
+            <CheckCircle2 className="h-12 w-12 text-primary" />
+            <h2 className="text-3xl font-semibold tracking-tight">Approved — thanks!</h2>
+            <p className="text-base text-muted-foreground">
+              Your playbook is with Aylek for final sign-off. We&apos;ll email
+              you when your sales agents go live.
+            </p>
+          </div>
+        </SlideContainer>
+      </Shell>
+    );
+  }
+
+  // ───────────────────────────────────────────────────────────────────
+  // Section-by-section review
+  // ───────────────────────────────────────────────────────────────────
+  if (stage.kind === "review" && playbook) {
+    const sectionIdx = stage.sectionIdx; // capture for closures
+    const section = SECTIONS[sectionIdx];
+    const isLast = sectionIdx === SECTIONS.length - 1;
+    const isApproved = sectionApprovals[section.id] === true;
+    const isFeedbackOpen = feedbackSection === section.id;
+    const isRegenerating = sectionRegenerating === section.id;
+
+    function submitSectionFeedback() {
+      const fb = feedbackText.trim();
+      if (fb.length < 5) {
+        setError("Tell me what to change.");
         return;
+      }
       setError(null);
+      setSectionRegenerating(section.id);
+      start(async () => {
+        const res = await fetch(`/api/onboarding/${props.token}/feedback`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ feedback: fb, section: section.id }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          ok: boolean;
+          error?: string;
+          section?: OnboardingSectionId;
+          content?: unknown;
+          round?: number;
+        } | null;
+        setSectionRegenerating(null);
+        if (!json?.ok || !json.section || json.content == null) {
+          setError(json?.error ?? "Failed to revise the section.");
+          return;
+        }
+        // Replace the section content + reset the approval flag locally
+        setPlaybook((pb) => (pb ? { ...pb, [section.id]: json.content } as GeneratedPlaybookDraft : pb));
+        setSectionApprovals((a) => ({ ...a, [section.id]: false }));
+        setFeedbackRounds((r) => [
+          ...r,
+          {
+            requested_at: new Date().toISOString(),
+            feedback: fb,
+            section: section.id,
+            prior_section: null,
+            prior_playbook: null,
+          },
+        ]);
+        setFeedbackText("");
+        setFeedbackSection(null);
+      });
+    }
+
+    function approveSection() {
+      setError(null);
+      start(async () => {
+        const res = await fetch(`/api/onboarding/${props.token}/approve-section`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ section: section.id }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          ok: boolean;
+          error?: string;
+          section_approvals?: Partial<Record<OnboardingSectionId, boolean>>;
+        } | null;
+        if (!json?.ok) {
+          setError(json?.error ?? "Failed to approve section.");
+          return;
+        }
+        setSectionApprovals(json.section_approvals ?? sectionApprovals);
+        if (isLast) {
+          // All sections now approved — submit to HOS
+          submitFinal();
+        } else {
+          setStage({ kind: "review", sectionIdx: sectionIdx + 1 });
+          bumpSlide();
+        }
+      });
+    }
+
+    function submitFinal() {
+      setStage({ kind: "submitting" });
+      bumpSlide();
       start(async () => {
         const res = await fetch(`/api/onboarding/${props.token}/approve`, {
           method: "POST",
@@ -305,366 +425,291 @@ export function OnboardingClient(props: {
           error?: string;
         } | null;
         if (!json?.ok) {
-          setError(json?.error ?? "Failed to approve playbook.");
+          setError(json?.error ?? "Failed to submit playbook.");
+          // Bounce back to the last section so they can retry
+          setStage({ kind: "review", sectionIdx: SECTIONS.length - 1 });
           return;
         }
         setStage({ kind: "approved" });
-      });
-    }
-    function submitFeedback() {
-      const fb = feedbackText.trim();
-      if (fb.length < 5) {
-        setError("Tell me what to change.");
-        return;
-      }
-      setError(null);
-      setStage({ kind: "regenerating" });
-      start(async () => {
-        const res = await fetch(`/api/onboarding/${props.token}/feedback`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ feedback: fb }),
-        });
-        const json = (await res.json().catch(() => null)) as {
-          ok: boolean;
-          error?: string;
-          playbook?: GeneratedPlaybookDraft;
-          warning?: string | null;
-          round?: number;
-        } | null;
-        if (!json?.ok || !json.playbook) {
-          setError(json?.error ?? "Failed to regenerate playbook.");
-          setStage({ kind: "playbook" });
-          return;
-        }
-        // (warning intentionally not surfaced — see top of component)
-        setPlaybook(json.playbook);
-        setFeedbackRounds((r) => [
-          ...r,
-          {
-            requested_at: new Date().toISOString(),
-            feedback: fb,
-            prior_playbook: null,
-          },
-        ]);
-        setFeedbackText("");
-        setFeedbackOpen(false);
-        setStage({ kind: "playbook" });
+        bumpSlide();
       });
     }
 
     return (
-      <Shell clientName={props.clientName}>
-        <div className="mx-auto max-w-3xl px-6 py-10">
-          <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 p-5">
-            <div className="flex items-start gap-3">
-              <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
-              <div>
-                <h1 className="text-lg font-semibold text-emerald-900">
-                  Your playbook is ready, {props.clientName}.
-                </h1>
-                <p className="mt-1 text-sm text-emerald-900/80">
-                  Read through the sections below. If something doesn&apos;t
-                  match how you sell, request a change and I&apos;ll rewrite it.
-                  When it looks right, approve and we&apos;ll send it to Aylek
-                  for final sign-off.
-                </p>
-                {feedbackRounds.length > 0 && (
-                  <p className="mt-2 text-xs text-emerald-900/70">
-                    Round {feedbackRounds.length + 1} of revisions.
-                  </p>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {error && (
-            <Alert variant="destructive" className="mb-4">
-              {error}
-            </Alert>
-          )}
-
-          <PlaybookView playbook={playbook} />
-
-          <div className="mt-8 flex flex-col gap-3 rounded-xl border bg-card p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-sm text-muted-foreground">
-              Happy with it, or want changes?
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={() => setFeedbackOpen((v) => !v)}>
-                <MessageSquare className="mr-1.5 h-3.5 w-3.5" /> Request changes
-              </Button>
-              <Button
-                onClick={approve}
-                disabled={pending}
-                className="bg-emerald-600 text-white hover:bg-emerald-700"
-              >
-                <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />{" "}
-                {pending ? "Submitting…" : "Approve playbook"}
-              </Button>
-            </div>
-          </div>
-
-          {feedbackOpen && (
-            <div className="mt-4 rounded-xl border bg-card p-5 shadow-sm">
-              <p className="text-sm font-medium">What should change?</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Be specific — e.g. &quot;sequence step 2 is too pushy, soften
-                it&quot; or &quot;ICP should also include logistics
-                companies&quot;.
+      <Shell>
+        <SectionProgress
+          current={stage.sectionIdx + 1}
+          total={SECTIONS.length}
+          label={section.label}
+        />
+        <SlideContainer slideKey={slideKey}>
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                Section {stage.sectionIdx + 1} of {SECTIONS.length}
               </p>
-              <Textarea
-                value={feedbackText}
-                onChange={(e) => setFeedbackText(e.target.value)}
-                placeholder="Tell me what to change…"
-                rows={4}
-                className="mt-3"
-                disabled={pending}
-              />
-              <div className="mt-3 flex justify-end gap-2">
-                <Button variant="ghost" size="sm" onClick={() => setFeedbackOpen(false)}>
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  disabled={pending || feedbackText.trim().length < 5}
-                  onClick={submitFeedback}
-                >
-                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Regenerate with
-                  feedback
-                </Button>
-              </div>
+              <h2 className="mt-1 text-3xl font-semibold tracking-tight">
+                {section.label}
+              </h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {sectionIntro(section.id, props.clientName)}
+              </p>
             </div>
-          )}
-        </div>
+
+            <div className="relative rounded-2xl border bg-card p-6 shadow-sm">
+              {isRegenerating && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-card/80 backdrop-blur-sm">
+                  <div className="flex flex-col items-center gap-2 text-sm text-muted-foreground">
+                    <RefreshCw className="h-6 w-6 animate-spin text-primary" />
+                    Updating this section…
+                  </div>
+                </div>
+              )}
+              <SectionView section={section.id} playbook={playbook} />
+            </div>
+
+            {error && (
+              <Alert variant="destructive">{error}</Alert>
+            )}
+
+            {isFeedbackOpen ? (
+              <div className="rounded-2xl border bg-card p-5 shadow-sm">
+                <p className="text-sm font-medium">What should change in this section?</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Be specific — e.g. &quot;ICP should also include logistics
+                  companies&quot; or &quot;step 2 is too pushy, soften it&quot;.
+                  Only this section will be rewritten.
+                </p>
+                <Textarea
+                  value={feedbackText}
+                  onChange={(e) => setFeedbackText(e.target.value)}
+                  rows={5}
+                  className="mt-3 resize-none"
+                  placeholder="Tell me what to change…"
+                  autoFocus
+                  disabled={pending || isRegenerating}
+                />
+                <div className="mt-3 flex justify-end gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setFeedbackSection(null);
+                      setFeedbackText("");
+                    }}
+                    disabled={pending || isRegenerating}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={submitSectionFeedback}
+                    disabled={pending || isRegenerating || feedbackText.trim().length < 5}
+                  >
+                    <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Submit feedback
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-card p-5 shadow-sm">
+                <p className="text-sm text-muted-foreground">
+                  {isApproved
+                    ? "Approved. You can still request more changes if anything looks off."
+                    : "Read it through. Approve to move on, or give feedback to revise just this section."}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setFeedbackSection(section.id);
+                      setError(null);
+                    }}
+                    disabled={pending || isRegenerating}
+                  >
+                    <MessageSquare className="mr-1.5 h-4 w-4" /> Give feedback
+                  </Button>
+                  <Button
+                    onClick={approveSection}
+                    disabled={pending || isRegenerating}
+                  >
+                    <CheckCircle2 className="mr-1.5 h-4 w-4" />
+                    {isLast
+                      ? pending
+                        ? "Submitting…"
+                        : "Approve & submit playbook"
+                      : pending
+                        ? "Approving…"
+                        : "Approve & continue"}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {feedbackRounds.length > 0 && (
+              <p className="text-center text-xs text-muted-foreground">
+                {feedbackRounds.length} revision{feedbackRounds.length === 1 ? "" : "s"} so far
+              </p>
+            )}
+          </div>
+        </SlideContainer>
       </Shell>
     );
   }
 
-  // ────────────────────────────────────────────────────────────────────
-  // Approved
-  // ────────────────────────────────────────────────────────────────────
-  return (
-    <Shell clientName={props.clientName}>
-      <div className="mx-auto flex max-w-xl flex-col items-center gap-4 px-6 py-24 text-center">
-        <CheckCircle2 className="h-12 w-12 text-emerald-600" />
-        <h2 className="text-2xl font-semibold">Approved — thanks!</h2>
-        <p className="text-sm text-muted-foreground">
-          Your playbook is with Aylek for final sign-off. We&apos;ll email you
-          when your sales agents go live.
-        </p>
-      </div>
-    </Shell>
-  );
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Subcomponents
+// Layout primitives
 // ─────────────────────────────────────────────────────────────────────────
 
-function Shell({
-  clientName,
-  children,
-}: {
-  clientName: string;
-  children: React.ReactNode;
-}) {
+function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-emerald-50/40 to-slate-50">
-      <header className="border-b bg-white/80 backdrop-blur">
-        <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-3 text-sm">
-          <span className="font-semibold tracking-tight">Aylek Sales</span>
-          <span className="text-muted-foreground">
-            Onboarding · <span className="text-foreground">{clientName}</span>
-          </span>
+    <div className="dark min-h-screen bg-background text-foreground">
+      <div className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,_hsl(160_84%_39%/0.08),_transparent_60%)]" />
+      <header className="border-b border-border/40 bg-background/60 backdrop-blur">
+        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+          <div className="flex items-center gap-2">
+            <div className="h-2 w-2 rounded-full bg-primary" />
+            <span className="text-sm font-semibold tracking-tight">
+              Aylek <span className="text-muted-foreground">Sales</span>
+            </span>
+          </div>
+          <span className="text-xs text-muted-foreground">Onboarding interview</span>
         </div>
       </header>
+      <main className="mx-auto max-w-5xl px-6 py-12 sm:py-20">{children}</main>
+    </div>
+  );
+}
+
+function SlideContainer({
+  slideKey,
+  children,
+}: {
+  slideKey: number;
+  children: React.ReactNode;
+}) {
+  // Re-mount on key change for a clean fade-in transition.
+  const [visible, setVisible] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    setVisible(false);
+    const t = setTimeout(() => setVisible(true), 20);
+    return () => clearTimeout(t);
+  }, [slideKey]);
+
+  return (
+    <div
+      ref={ref}
+      key={slideKey}
+      className={`transform-gpu transition-all duration-300 ease-out ${
+        visible ? "translate-y-0 opacity-100" : "translate-y-3 opacity-0"
+      }`}
+    >
       {children}
     </div>
   );
 }
 
-function ChatBubble({
-  role,
-  text,
-  muted,
-}: {
-  role: "assistant" | "user";
-  text: string;
-  muted?: boolean;
-}) {
-  const isUser = role === "user";
+function ProgressDots({ current, total }: { current: number; total: number }) {
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-          isUser
-            ? "bg-emerald-600 text-white"
-            : "bg-muted text-foreground"
-        } ${muted ? "opacity-50" : ""}`}
-      >
-        {text}
+    <div className="mx-auto mb-10 flex max-w-3xl items-center gap-1.5">
+      {Array.from({ length: total }, (_, i) => {
+        const slot = i + 1;
+        const isCurrent = slot === current;
+        const isCompleted = slot < current;
+        return (
+          <span
+            key={i}
+            className={`h-1.5 flex-1 rounded-full transition-colors ${
+              isCompleted
+                ? "bg-primary"
+                : isCurrent
+                  ? "bg-primary/60"
+                  : "bg-muted"
+            }`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function SectionProgress({
+  current,
+  total,
+  label,
+}: {
+  current: number;
+  total: number;
+  label: string;
+}) {
+  return (
+    <div className="mx-auto mb-10 flex max-w-3xl items-center justify-between">
+      <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+        {label}
+      </p>
+      <div className="flex items-center gap-1.5">
+        {Array.from({ length: total }, (_, i) => {
+          const slot = i + 1;
+          const isCurrent = slot === current;
+          const isCompleted = slot < current;
+          return (
+            <span
+              key={i}
+              className={`h-2 w-2 rounded-full transition-colors ${
+                isCompleted ? "bg-primary" : isCurrent ? "bg-primary" : "bg-muted ring-1 ring-border"
+              }`}
+            />
+          );
+        })}
+        <span className="ml-2 text-xs text-muted-foreground">
+          {current} / {total}
+        </span>
       </div>
     </div>
   );
 }
 
-function PlaybookView({ playbook }: { playbook: GeneratedPlaybookDraft }) {
-  return (
-    <div className="space-y-6">
-      <Section title="ICP — who you sell to">
-        <Field label="Industries" value={(playbook.icp.industries ?? []).join(", ")} />
-        <Field label="Company size" value={playbook.icp.company_size ?? ""} />
-        <Field
-          label="Target titles"
-          value={(playbook.icp.target_titles ?? []).join(", ")}
-        />
-        <Field label="Geography" value={(playbook.icp.geography ?? []).join(", ")} />
-        <Field label="Qualification signal" value={playbook.icp.qualification_signal ?? ""} />
-        {(playbook.icp.disqualifiers ?? []).length > 0 && (
-          <Field label="Disqualifiers" value={(playbook.icp.disqualifiers ?? []).join("; ")} />
-        )}
-      </Section>
+// ─────────────────────────────────────────────────────────────────────────
+// Per-section views
+// ─────────────────────────────────────────────────────────────────────────
 
-      <Section title="Strategy & messaging">
-        <Field label="Value proposition" value={playbook.strategy.value_proposition ?? ""} />
-        {(playbook.strategy.key_messages ?? []).length > 0 && (
-          <List label="Key messages" items={playbook.strategy.key_messages ?? []} />
-        )}
-        {(playbook.strategy.proof_points ?? []).length > 0 && (
-          <List label="Proof points" items={playbook.strategy.proof_points ?? []} />
-        )}
-        {(playbook.strategy.objection_responses ?? []).length > 0 && (
-          <div className="space-y-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Objection responses
-            </p>
-            <ul className="space-y-2 text-sm">
-              {(playbook.strategy.objection_responses ?? []).map((o, i) => (
-                <li key={i} className="rounded-md border bg-muted/30 p-3">
-                  <p className="font-medium">{o.objection}</p>
-                  <p className="mt-1 text-muted-foreground">{o.response}</p>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </Section>
-
-      <Section title="Voice & tone">
-        {(playbook.voice_tone.tone_descriptors ?? []).length > 0 && (
-          <Field
-            label="Tone descriptors"
-            value={(playbook.voice_tone.tone_descriptors ?? []).join(", ")}
-          />
-        )}
-        <Field label="Writing style" value={playbook.voice_tone.writing_style ?? ""} />
-        {(playbook.voice_tone.avoid ?? []).length > 0 && (
-          <Field label="Avoid" value={(playbook.voice_tone.avoid ?? []).join(", ")} />
-        )}
-        {(playbook.voice_tone.example_phrases ?? []).length > 0 && (
-          <List
-            label="Example phrases"
-            items={playbook.voice_tone.example_phrases ?? []}
-          />
-        )}
-      </Section>
-
-      <Section title="Reply strategy">
-        {Object.entries(playbook.reply_strategy ?? {}).map(([kind, val]) => (
-          <div key={kind} className="rounded-md border bg-muted/30 p-3 text-sm">
-            <p className="font-medium capitalize">{kind.replace(/_/g, " ")}</p>
-            {val?.action && <p className="mt-1 text-muted-foreground">Action: {val.action}</p>}
-            {val?.template && (
-              <pre className="mt-2 whitespace-pre-wrap font-mono text-xs text-foreground/80">
-                {val.template}
-              </pre>
-            )}
-          </div>
-        ))}
-      </Section>
-
-      <Section title="Sales team">
-        {(playbook.team_members ?? []).length === 0 ? (
-          <p className="text-sm text-muted-foreground">No team members listed.</p>
-        ) : (
-          <ul className="space-y-2 text-sm">
-            {(playbook.team_members ?? []).map((m) => (
-              <li key={m.id} className="rounded-md border bg-muted/30 p-3">
-                <p className="font-medium">{m.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  {m.title} · {m.email}
-                </p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Section>
-
-      <Section title="Sales process">
-        <ul className="space-y-2 text-sm">
-          {(playbook.sales_process ?? []).map((s: SalesProcessStage, i: number) => (
-            <li key={s.id} className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="font-medium">
-                  {i + 1}. {s.name}
-                </p>
-                <span className="rounded-full border bg-background px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-                  {s.agent}
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">{s.description}</p>
-              {s.condition && (
-                <p className="mt-1 rounded-md bg-amber-50 px-2 py-1 text-xs text-amber-900">
-                  Condition: {s.condition}
-                </p>
-              )}
-            </li>
-          ))}
-        </ul>
-      </Section>
-
-      <Section title="Email sequence">
-        <ol className="space-y-3 text-sm">
-          {(playbook.sequences ?? []).map((seq) => (
-            <li key={seq.step} className="rounded-md border bg-muted/30 p-3">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Step {seq.step}{" "}
-                {seq.delay_days > 0 ? `· +${seq.delay_days} days` : "· same day"}
-              </p>
-              <p className="mt-2 font-medium">{seq.subject}</p>
-              <pre className="mt-2 whitespace-pre-wrap font-mono text-xs text-foreground/80">
-                {seq.body}
-              </pre>
-            </li>
-          ))}
-        </ol>
-      </Section>
-
-      {playbook.notes && (
-        <Section title="Notes from the AI">
-          <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">
-            {playbook.notes}
-          </p>
-        </Section>
-      )}
-    </div>
-  );
+function sectionIntro(s: OnboardingSectionId, clientName: string): string {
+  switch (s) {
+    case "icp":
+      return `The exact customer profile your agents will source against. Drawn from how you described ${clientName}'s best-fit buyers.`;
+    case "strategy":
+      return `Your value proposition, the messages that land, and how to handle the objections you actually hear.`;
+    case "voice_tone":
+      return `How your team writes — what to do, what to avoid, and how it should feel to read.`;
+    case "sequences":
+      return `The 3-step outbound email sequence your agents will run. Written in your voice for your buyers.`;
+    case "sales_process":
+      return `The full lifecycle — who owns each stage and the conditions that gate them.`;
+  }
 }
 
-function Section({
-  title,
-  children,
+function SectionView({
+  section,
+  playbook,
 }: {
-  title: string;
-  children: React.ReactNode;
+  section: OnboardingSectionId;
+  playbook: GeneratedPlaybookDraft;
 }) {
-  return (
-    <section className="rounded-xl border bg-card p-5 shadow-sm">
-      <h3 className="mb-3 text-base font-semibold">{title}</h3>
-      <div className="space-y-3">{children}</div>
-    </section>
-  );
+  switch (section) {
+    case "icp":
+      return <IcpView icp={playbook.icp} />;
+    case "strategy":
+      return <StrategyView strategy={playbook.strategy} />;
+    case "voice_tone":
+      return <VoiceToneView voice={playbook.voice_tone} />;
+    case "sequences":
+      return <SequencesView sequences={playbook.sequences} />;
+    case "sales_process":
+      return <SalesProcessView stages={playbook.sales_process} />;
+  }
 }
 
 function Field({ label, value }: { label: string; value: string }) {
@@ -680,7 +725,7 @@ function Field({ label, value }: { label: string; value: string }) {
 }
 
 function List({ label, items }: { label: string; items: string[] }) {
-  if (items.length === 0) return null;
+  if (!items || items.length === 0) return null;
   return (
     <div className="text-sm">
       <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -692,5 +737,128 @@ function List({ label, items }: { label: string; items: string[] }) {
         ))}
       </ul>
     </div>
+  );
+}
+
+function IcpView({ icp }: { icp: GeneratedPlaybookDraft["icp"] }) {
+  return (
+    <div className="space-y-4">
+      <Field label="Industries" value={(icp.industries ?? []).join(", ")} />
+      <Field label="Company size" value={icp.company_size ?? ""} />
+      <Field label="Target titles" value={(icp.target_titles ?? []).join(", ")} />
+      <Field label="Geography" value={(icp.geography ?? []).join(", ")} />
+      <Field label="Qualification signal" value={icp.qualification_signal ?? ""} />
+      {(icp.disqualifiers ?? []).length > 0 && (
+        <Field label="Disqualifiers" value={(icp.disqualifiers ?? []).join("; ")} />
+      )}
+    </div>
+  );
+}
+
+function StrategyView({
+  strategy,
+}: {
+  strategy: GeneratedPlaybookDraft["strategy"];
+}) {
+  return (
+    <div className="space-y-4">
+      <Field label="Value proposition" value={strategy.value_proposition ?? ""} />
+      <List label="Key messages" items={strategy.key_messages ?? []} />
+      <List label="Proof points" items={strategy.proof_points ?? []} />
+      {(strategy.objection_responses ?? []).length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Objection responses
+          </p>
+          <ul className="space-y-2 text-sm">
+            {(strategy.objection_responses ?? []).map((o, i) => (
+              <li key={i} className="rounded-md border border-border/60 bg-background/40 p-3">
+                <p className="font-medium">{o.objection}</p>
+                <p className="mt-1 text-muted-foreground">{o.response}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VoiceToneView({
+  voice,
+}: {
+  voice: GeneratedPlaybookDraft["voice_tone"];
+}) {
+  return (
+    <div className="space-y-4">
+      <Field
+        label="Tone descriptors"
+        value={(voice.tone_descriptors ?? []).join(", ")}
+      />
+      <Field label="Writing style" value={voice.writing_style ?? ""} />
+      <Field label="Avoid" value={(voice.avoid ?? []).join(", ")} />
+      <List label="Example phrases" items={voice.example_phrases ?? []} />
+    </div>
+  );
+}
+
+function SequencesView({
+  sequences,
+}: {
+  sequences: PlaybookSequenceStep[];
+}) {
+  if (!sequences || sequences.length === 0) {
+    return <p className="text-sm text-muted-foreground">No sequence yet.</p>;
+  }
+  return (
+    <ol className="space-y-4 text-sm">
+      {sequences.map((seq) => (
+        <li
+          key={seq.step}
+          className="rounded-lg border border-border/60 bg-background/40 p-4"
+        >
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Step {seq.step}{" "}
+            {seq.delay_days > 0 ? `· +${seq.delay_days} days` : "· same day"}
+          </p>
+          <p className="mt-2 font-medium">{seq.subject}</p>
+          <pre className="mt-2 whitespace-pre-wrap font-mono text-xs leading-relaxed text-foreground/90">
+            {seq.body}
+          </pre>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function SalesProcessView({
+  stages,
+}: {
+  stages: SalesProcessStage[];
+}) {
+  if (!stages || stages.length === 0) {
+    return <p className="text-sm text-muted-foreground">No process yet.</p>;
+  }
+  return (
+    <ul className="space-y-3 text-sm">
+      {stages.map((s, i) => (
+        <li key={s.id} className="rounded-lg border border-border/60 bg-background/40 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="font-medium">
+              {i + 1}. {s.name}
+            </p>
+            <span className="rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+              {s.agent}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">{s.description}</p>
+          {s.condition && (
+            <p className="mt-2 rounded-md bg-primary/10 px-2 py-1 text-xs text-primary-foreground/90">
+              Condition: {s.condition}
+            </p>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }
