@@ -58,7 +58,11 @@ export function OnboardingClient(props: {
       out.push({ role: "assistant", topic: t.topic, text: t.question });
       out.push({ role: "user", topic: t.topic, text: t.answer });
     }
-    if (props.initialQuestion && initialStage.kind === "interview") {
+    // Seed the first assistant turn whenever there's an initial question,
+    // regardless of stage. The welcome screen renders its own JSX so this
+    // doesn't show until the user clicks "Start the interview" — at which
+    // point the chat already has the question rendered above the input box.
+    if (props.initialQuestion) {
       out.push({
         role: "assistant",
         topic: props.initialQuestion.topic,
