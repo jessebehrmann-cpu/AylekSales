@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { runProspect01 } from "@/lib/agents/prospect-01";
 import { apolloKeyFingerprint } from "@/lib/apollo";
+import { hunterKeyFingerprint } from "@/lib/hunter";
+import { resolveProviders } from "@/lib/agents/providers";
 import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -17,9 +19,13 @@ const Body = z.object({ client_id: z.string().uuid() });
  *  - Logged-in admin session via cookies   (for the "Run Prospect-01" button)
  */
 export async function POST(req: NextRequest) {
-  // Diagnostic: surface which Apollo key is actually being read at runtime
-  // so Vercel logs make 403 "free plan" trivial to root-cause.
-  console.log(`[prospect] apollo key fingerprint: ${apolloKeyFingerprint()}`);
+  // Diagnostic: surface which provider keys are actually being read at
+  // runtime + which one this run will use first. Makes 403 "free plan"
+  // and "fell back to Hunter" trivial to root-cause from Vercel logs.
+  const providers = resolveProviders();
+  console.log(
+    `[prospect] apollo=${apolloKeyFingerprint()} hunter=${hunterKeyFingerprint()} primary=${providers.primary} fallback=${providers.fallback}`,
+  );
 
   const auth = req.headers.get("authorization");
   const cronOk =

@@ -350,6 +350,10 @@ export type ICP = {
   geography?: string[];
   qualification_signal?: string;
   disqualifiers?: string[];
+  /** Optional explicit list of company domains to source against. Required
+   *  when Prospect-01 is running with the Hunter.io provider (Hunter is
+   *  domain-driven, not industry-driven). Ignored by Apollo. */
+  target_domains?: string[];
 };
 
 export type PlaybookSequenceStep = {

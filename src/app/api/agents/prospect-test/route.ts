@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { apolloKeyFingerprint } from "@/lib/apollo";
+import { hunterKeyFingerprint } from "@/lib/hunter";
+import { resolveProviders } from "@/lib/agents/providers";
 import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -8,33 +10,27 @@ export const maxDuration = 30;
 /**
  * GET /api/agents/prospect-test
  *
- * Diagnostic probe for the Apollo integration. Hits BOTH the search
- * endpoints we care about with a minimal payload, and returns the raw
- * status + selected response headers + first 2000 chars of body for
- * each. Plus the runtime fingerprint of `APOLLO_API_KEY` so we can
- * confirm Vercel is reading the key we expect (without ever leaking
- * the full value).
+ * Diagnostic probe for the Prospect-01 providers. Hits each configured
+ * provider with the cheapest available endpoint and returns the raw
+ * response so we can root-cause 4xx/5xx errors in production without
+ * burning credits or leaking keys.
  *
- * What this answers when Apollo returns 403 "free plan":
- *  - Is the key being read at runtime the one I pasted into Vercel?
- *    (compare key_fingerprint vs. the first 8 + last 4 of your Apollo
- *    master key)
- *  - Is one endpoint working but not the other? Both `api_search` and
- *    `search` are tested.
- *  - What does Apollo's body actually say? The plain-text response is
- *    in `body_excerpt`.
+ * Apollo:
+ *  - POST /api/v1/mixed_people/api_search (small payload, returns IDs)
+ *  - POST /api/v1/mixed_people/search     (same dataset, different params)
+ *  - Both endpoints are exercised so we can see which (if any) Basic plan
+ *    allows. bulk_match is NOT exercised — it consumes credits and a
+ *    403 typically originates from the search step.
  *
- * Auth: same as POST /api/agents/prospect — CRON_SECRET bearer OR
- * logged-in admin session.
+ * Hunter:
+ *  - GET /v2/account — zero-credit probe that returns plan + remaining
+ *    searches. Confirms the key is valid and the account is on a paid
+ *    tier without spending a search.
  *
- * Endpoint notes (verified against Apollo docs as of 2026-05):
- *  - `/api/v1/mixed_people/api_search` — API-key-driven People Search.
- *    Available on Basic and above; the path Prospect-01 uses today.
- *  - `/api/v1/mixed_people/search` — same dataset, slightly different
- *    accepted params. Also Basic and above.
- *  - `/api/v1/people/bulk_match` — People Enrichment (consumes credits).
- *    NOT called here on purpose — bulk_match costs money per match and
- *    a 403 won't usually originate from this path.
+ * For each call: status, selected response headers, first 2000 chars of
+ * body, and the key fingerprint that was used.
+ *
+ * Auth: CRON_SECRET bearer OR logged-in admin session.
  */
 export async function GET(req: NextRequest) {
   // ── Auth ────────────────────────────────────────────────────────────
@@ -60,86 +56,183 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // ── Diagnostic body ────────────────────────────────────────────────
-  const fingerprint = apolloKeyFingerprint();
-  console.log(`[prospect-test] key=${fingerprint}`);
+  const providers = resolveProviders();
+  console.log(
+    `[prospect-test] apollo_key=${apolloKeyFingerprint()} hunter_key=${hunterKeyFingerprint()} primary=${providers.primary} fallback=${providers.fallback}`,
+  );
 
-  const base = process.env.APOLLO_BASE_URL ?? "https://api.apollo.io";
+  const apollo = providers.apollo_available
+    ? await probeApollo()
+    : { skipped: "APOLLO_API_KEY not set", key_fingerprint: apolloKeyFingerprint() };
+
+  const hunter = providers.hunter_available
+    ? await probeHunter()
+    : { skipped: "HUNTER_API_KEY not set", key_fingerprint: hunterKeyFingerprint() };
+
+  return NextResponse.json({ providers, apollo, hunter });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Apollo probe — both search endpoints, minimal payload
+// ─────────────────────────────────────────────────────────────────────────
+
+async function probeApollo(): Promise<unknown> {
+  const apolloBase = process.env.APOLLO_BASE_URL ?? "https://api.apollo.io";
   const apiKey = process.env.APOLLO_API_KEY?.trim();
   if (!apiKey) {
-    return NextResponse.json(
-      {
-        apollo_base: base,
-        key_fingerprint: fingerprint,
-        error: "APOLLO_API_KEY is not set in this environment.",
-      },
-      { status: 400 },
-    );
+    return {
+      key_fingerprint: apolloKeyFingerprint(),
+      error: "APOLLO_API_KEY is not set in this environment.",
+    };
   }
-
-  // Minimal payload — broad enough to return a real response (not an
-  // empty default), small enough to consume the least credits possible.
   const minimalBody = JSON.stringify({
     per_page: 1,
     page: 1,
     person_titles: ["CEO"],
   });
-
   const endpoints = [
     "/api/v1/mixed_people/api_search",
     "/api/v1/mixed_people/search",
   ];
-
-  const calls = [];
-  for (const endpoint of endpoints) {
-    const url = `${base}${endpoint}`;
-    let status = 0;
-    let bodyExcerpt = "";
-    const headers: Record<string, string> = {};
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "Cache-Control": "no-cache",
-        },
-        body: minimalBody,
-      });
-      status = res.status;
-      // Capture useful response headers (rate limits, content-type, etc).
-      for (const name of [
-        "content-type",
-        "x-rate-limit-remaining",
-        "x-rate-limit-limit",
-        "x-rate-limit-reset",
-        "retry-after",
-      ]) {
-        const v = res.headers.get(name);
-        if (v) headers[name] = v;
+  const calls = await Promise.all(
+    endpoints.map(async (endpoint) => {
+      const url = `${apolloBase}${endpoint}`;
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "Cache-Control": "no-cache",
+          },
+          body: minimalBody,
+        });
+        const headers = pickHeaders(res, [
+          "content-type",
+          "x-rate-limit-remaining",
+          "x-rate-limit-limit",
+          "x-rate-limit-reset",
+          "retry-after",
+        ]);
+        const body_excerpt = (await res.text()).slice(0, 2000);
+        console.log(`[prospect-test] apollo ${endpoint} → ${res.status}`);
+        return {
+          endpoint,
+          url,
+          status: res.status,
+          ok: res.ok,
+          headers,
+          body_excerpt,
+        };
+      } catch (err) {
+        console.error(`[prospect-test] apollo ${endpoint} threw`, err);
+        return {
+          endpoint,
+          url,
+          status: 0,
+          ok: false,
+          headers: {},
+          body_excerpt: err instanceof Error ? err.message : String(err),
+        };
       }
-      const text = await res.text();
-      bodyExcerpt = text.slice(0, 2000);
-      console.log(
-        `[prospect-test] ${endpoint} → ${status} (key ${fingerprint})`,
-      );
-    } catch (err) {
-      bodyExcerpt = err instanceof Error ? err.message : String(err);
-      console.error(`[prospect-test] ${endpoint} threw`, err);
-    }
-    calls.push({
-      endpoint,
-      url,
-      status,
-      ok: status >= 200 && status < 300,
-      headers,
-      body_excerpt: bodyExcerpt,
-    });
-  }
-
-  return NextResponse.json({
-    apollo_base: base,
-    key_fingerprint: fingerprint,
+    }),
+  );
+  return {
+    apollo_base: apolloBase,
+    key_fingerprint: apolloKeyFingerprint(),
     calls,
-  });
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Hunter probe — zero-credit /v2/account
+// ─────────────────────────────────────────────────────────────────────────
+
+async function probeHunter(): Promise<unknown> {
+  const hunterBase = process.env.HUNTER_BASE_URL ?? "https://api.hunter.io";
+  const apiKey = process.env.HUNTER_API_KEY?.trim();
+  if (!apiKey) {
+    return {
+      key_fingerprint: hunterKeyFingerprint(),
+      error: "HUNTER_API_KEY is not set in this environment.",
+    };
+  }
+  const url = `${hunterBase}/v2/account?api_key=${encodeURIComponent(apiKey)}`;
+  // Strip the api_key from the URL we log/return.
+  const loggable = `${hunterBase}/v2/account?api_key=…`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+    });
+    const headers = pickHeaders(res, [
+      "content-type",
+      "x-ratelimit-remaining",
+      "x-ratelimit-limit",
+      "retry-after",
+    ]);
+    const text = await res.text();
+    const body_excerpt = text.slice(0, 2000);
+    console.log(`[prospect-test] hunter /v2/account → ${res.status}`);
+    let plan: string | undefined;
+    let requests_used: number | undefined;
+    let requests_available: number | undefined;
+    if (res.ok) {
+      try {
+        const json = JSON.parse(text) as {
+          data?: {
+            plan_name?: string;
+            requests?: { searches?: { used?: number; available?: number } };
+          };
+        };
+        plan = json.data?.plan_name;
+        requests_used = json.data?.requests?.searches?.used;
+        requests_available = json.data?.requests?.searches?.available;
+      } catch {
+        // body wasn't JSON — leave summary fields undefined
+      }
+    }
+    return {
+      hunter_base: hunterBase,
+      key_fingerprint: hunterKeyFingerprint(),
+      calls: [
+        {
+          endpoint: "/v2/account",
+          url: loggable,
+          status: res.status,
+          ok: res.ok,
+          headers,
+          body_excerpt,
+          plan,
+          requests_used,
+          requests_available,
+        },
+      ],
+    };
+  } catch (err) {
+    console.error(`[prospect-test] hunter /v2/account threw`, err);
+    return {
+      hunter_base: hunterBase,
+      key_fingerprint: hunterKeyFingerprint(),
+      calls: [
+        {
+          endpoint: "/v2/account",
+          url: loggable,
+          status: 0,
+          ok: false,
+          headers: {},
+          body_excerpt: err instanceof Error ? err.message : String(err),
+        },
+      ],
+    };
+  }
+}
+
+function pickHeaders(res: Response, names: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of names) {
+    const v = res.headers.get(name);
+    if (v) out[name] = v;
+  }
+  return out;
 }

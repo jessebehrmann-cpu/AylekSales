@@ -11,6 +11,7 @@ import { EditClientForm } from "./edit-client-form";
 import { RunProspectButton } from "./run-prospect-button";
 import { OnboardingTimelineCard } from "./onboarding-timeline";
 import { ExternalLink, Users, Send } from "lucide-react";
+import { resolveProviders } from "@/lib/agents/providers";
 import type { OnboardingSession } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
@@ -49,6 +50,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
 
   if (!client) notFound();
   const onboardingSessions = (onboardingRows ?? []) as OnboardingSession[];
+  const providerConfig = resolveProviders();
 
   return (
     <>
@@ -102,7 +104,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
               Sources contacts via Apollo against this client&apos;s approved playbook ICP. New leads land in the approval queue.
             </p>
           </div>
-          <RunProspectButton clientId={client.id} />
+          <RunProspectButton clientId={client.id} providerConfig={providerConfig} />
         </CardHeader>
       </Card>
 

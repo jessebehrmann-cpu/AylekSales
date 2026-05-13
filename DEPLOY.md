@@ -61,10 +61,16 @@ After deploy, point the Stripe webhook at
 
 ### Required for Prospect-01 (lead sourcing)
 
+Prospect-01 supports two providers. Set whichever you have access to — both is best (Apollo primary, Hunter as automatic fallback on 403 / 429 / 5xx).
+
 | Variable | Where to get it | Notes |
 |----------|-----------------|-------|
-| `APOLLO_API_KEY` | https://app.apollo.io/ → Settings → Integrations → API | Without this, the Run Prospect-01 button surfaces a clear "configure Apollo" error. **Free plan: 50 exports/month. Basic plan: 10,000/month.** |
+| `APOLLO_API_KEY` | https://app.apollo.io/ → Settings → Integrations → API | **Primary when set.** Industry/title-driven. Search endpoint requires the Basic plan or higher. Free: 50 exports/mo. Basic: 10,000/mo. |
 | `APOLLO_BASE_URL` | optional | Defaults to `https://api.apollo.io` — only override if you're using a regional or sandbox endpoint. |
+| `HUNTER_API_KEY` | https://hunter.io/api-keys | **Fallback when both are set; sole provider when only this is set.** Domain-driven — requires `icp.target_domains` on the playbook. Free: 25 searches/mo. |
+| `HUNTER_BASE_URL` | optional | Defaults to `https://api.hunter.io`. |
+
+Without either key the **Run Prospect-01** button is disabled and surfaces a clear "configure a provider" error. Diagnostic endpoint: `GET /api/agents/prospect-test` (admin-auth or `Authorization: Bearer ${CRON_SECRET}`) probes both providers — Apollo with a minimal search payload and Hunter with the zero-credit `/v2/account` endpoint — and returns the raw responses plus a fingerprint of each key actually being read at runtime.
 
 ### Required for crons + agent triggers
 
