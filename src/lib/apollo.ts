@@ -106,6 +106,21 @@ function getApiKey(): string {
   return key;
 }
 
+/**
+ * Public fingerprint of APOLLO_API_KEY for logs. Returns the first 8 + last
+ * 4 chars + total length so we can confirm the runtime is reading the key
+ * we expect, without ever logging the full secret. Returns "(missing)"
+ * when the env var isn't set.
+ */
+export function apolloKeyFingerprint(): string {
+  const key = process.env.APOLLO_API_KEY?.trim();
+  if (!key) return "(missing)";
+  if (key.length <= 12) return `(${key.length} chars — too short to fingerprint)`;
+  const head = key.slice(0, 8);
+  const tail = key.slice(-4);
+  return `${head}…${tail} (${key.length} chars)`;
+}
+
 async function apolloFetch(path: string, init: RequestInit, attempt = 0): Promise<Response> {
   const apiKey = getApiKey();
   const url = `${APOLLO_BASE}${path}`;
@@ -120,6 +135,11 @@ async function apolloFetch(path: string, init: RequestInit, attempt = 0): Promis
       ...(init.headers ?? {}),
     },
   });
+
+  // Diagnostic line for Vercel logs — never includes the full key.
+  console.log(
+    `[apollo] ${init.method ?? "GET"} ${path} → ${res.status} (key ${apolloKeyFingerprint()}, attempt ${attempt})`,
+  );
 
   if (res.status === 429 && attempt < 2) {
     const retryAfter = Number(res.headers.get("Retry-After") ?? 2);
