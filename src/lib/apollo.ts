@@ -1,24 +1,37 @@
 /**
- * Apollo.io API client.
+ * Apollo.io API client — two-step search → enrich.
  *
- * Endpoint: POST https://api.apollo.io/v1/mixed_people/search
- * Auth: APOLLO_API_KEY environment variable, sent as the `X-Api-Key` header.
+ * Apollo's People Search endpoint returns matching contacts but NOT their
+ * email addresses. To get emails we have to call the bulk-match enrichment
+ * endpoint with the Apollo person IDs from the search.
  *
- * Filter shape (per ICP fields supplied by Prospect-01):
- *   - person_titles                       ← ICP.target_titles
- *   - q_organization_industry_keywords    ← ICP.industries (free-text keyword match)
- *   - organization_num_employees_ranges   ← ICP.company_size (e.g. "50,1000")
- *   - person_locations                    ← ICP.geography
+ * Step 1 — POST `/api/v1/mixed_people/api_search`
+ *   Filter shape (per ICP fields supplied by Prospect-01):
+ *     - person_titles                       ← ICP.target_titles
+ *     - q_organization_industry_keywords    ← ICP.industries (free-text keyword match)
+ *     - organization_num_employees_ranges   ← ICP.company_size (e.g. "50,1000")
+ *     - person_locations                    ← ICP.geography
+ *   Returns an array of people with `id` + name/title/org but no email.
+ *
+ * Step 2 — POST `/api/v1/people/bulk_match`
+ *   Body: { details: [{ id }, ...], reveal_personal_emails: true }
+ *   Limit: 10 people per call (we chunk transparently).
+ *   Returns enriched contacts with email + work info. Each match consumes
+ *   Apollo credits — free plans may still return placeholders for some
+ *   contacts; we filter those out.
+ *
+ * Auth: APOLLO_API_KEY is sent as the `x-api-key` header on EVERY request
+ * (search + enrich both require a master key — the search endpoint does
+ * not accept Authorization-bearer auth).
  *
  * Rate limiting: Apollo returns 429 on burst; we honour Retry-After and
  * back off twice. 5xx are retried with exponential backoff.
- *
- * Plan note: Apollo's free tier returns "email_not_unlocked@..." placeholder
- * emails for many contacts (paid unlock per export). We treat those as
- * missing — Prospect-01 only inserts leads with real email addresses.
  */
 
 const APOLLO_BASE = process.env.APOLLO_BASE_URL ?? "https://api.apollo.io";
+const SEARCH_PATH = "/api/v1/mixed_people/api_search";
+const ENRICH_PATH = "/api/v1/people/bulk_match";
+const ENRICH_CHUNK_SIZE = 10;
 
 export class ApolloConfigError extends Error {}
 export class ApolloApiError extends Error {
@@ -67,8 +80,17 @@ export type ApolloContact = {
 };
 
 export type ApolloSearchResult = {
+  /** Enriched contacts WITH email. Search hits that failed enrichment are
+   *  dropped — see `searched_total` / `enrichment_attempted` for the full
+   *  funnel. */
   contacts: ApolloContact[];
-  /** Total matching the filter (may be larger than what's returned). */
+  /** How many people the search step matched (pre-enrichment). */
+  searched_total: number;
+  /** How many person IDs we attempted to enrich. */
+  enrichment_attempted: number;
+  /** How many of those came back with a usable email. */
+  enriched_with_email: number;
+  /** Total matching the filter across all pages (Apollo `pagination.total_entries`). */
   total_results?: number;
   /** Number of pages available for the current per_page value. */
   total_pages?: number;
@@ -91,8 +113,9 @@ async function apolloFetch(path: string, init: RequestInit, attempt = 0): Promis
     ...init,
     headers: {
       "Content-Type": "application/json",
-      // Apollo accepts both X-Api-Key (preferred) and api_key in the body
-      "X-Api-Key": apiKey,
+      // Master API key — Apollo's search + enrichment endpoints both
+      // require this header (NOT Authorization-bearer).
+      "x-api-key": apiKey,
       "Cache-Control": "no-cache",
       ...(init.headers ?? {}),
     },
@@ -110,23 +133,63 @@ async function apolloFetch(path: string, init: RequestInit, attempt = 0): Promis
   return res;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Public entry: 2-step search → enrich → return contacts with email
+// ─────────────────────────────────────────────────────────────────────────
+
 /**
- * People Search via the Apollo `mixed_people/search` endpoint.
- *
- * If your Apollo plan exposes additional filter fields, extend
- * `buildSearchBody` here — Prospect-01 only sees normalised
- * `ApolloContact[]` objects.
+ * Find people matching the ICP filter and return them WITH email addresses.
+ * Internally runs the search-then-enrich flow. Callers (Prospect-01) only
+ * see contacts that have a real, usable email — the funnel counts are
+ * exposed on the result so the agent can log how many search hits were
+ * dropped at enrichment.
  */
 export async function searchApolloContacts(
   filter: ApolloSearchFilter,
 ): Promise<ApolloSearchResult> {
-  const body = buildSearchBody(filter);
+  const search = await searchPeople(filter);
+  const ids = search.partials.map((p) => p.id).filter((id): id is string => !!id);
 
-  const res = await apolloFetch(`/v1/mixed_people/search`, {
+  if (ids.length === 0) {
+    return {
+      contacts: [],
+      searched_total: search.partials.length,
+      enrichment_attempted: 0,
+      enriched_with_email: 0,
+      total_results: search.total_results,
+      total_pages: search.total_pages,
+    };
+  }
+
+  const enriched = await enrichPeople(ids);
+  const withEmail = enriched.filter((c) => c.email != null);
+
+  return {
+    contacts: withEmail,
+    searched_total: search.partials.length,
+    enrichment_attempted: ids.length,
+    enriched_with_email: withEmail.length,
+    total_results: search.total_results,
+    total_pages: search.total_pages,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Step 1 — search for matching people (no emails returned)
+// ─────────────────────────────────────────────────────────────────────────
+
+type SearchStepResult = {
+  partials: ApolloContact[];
+  total_results?: number;
+  total_pages?: number;
+};
+
+async function searchPeople(filter: ApolloSearchFilter): Promise<SearchStepResult> {
+  const body = buildSearchBody(filter);
+  const res = await apolloFetch(SEARCH_PATH, {
     method: "POST",
     body: JSON.stringify(body),
   });
-
   const text = await res.text();
   if (!res.ok) {
     throw new ApolloApiError(
@@ -135,7 +198,6 @@ export async function searchApolloContacts(
       text.slice(0, 1000),
     );
   }
-
   const json = text ? safeJson(text) : {};
   return normaliseSearchResponse(json);
 }
@@ -150,8 +212,6 @@ function buildSearchBody(filter: ApolloSearchFilter): Record<string, unknown> {
     body.person_titles = filter.titles;
   }
   if (filter.industries?.length) {
-    // Apollo prefers `q_organization_industry_keywords` for free-text industry
-    // matching — works on any plan (industry tag IDs require an extra lookup).
     body.q_organization_industry_keywords = filter.industries;
   }
   if (filter.locations?.length) {
@@ -161,7 +221,6 @@ function buildSearchBody(filter: ApolloSearchFilter): Record<string, unknown> {
     const min = filter.companySize.min;
     const max = filter.companySize.max;
     if (min != null || max != null) {
-      // Apollo expects an array of "min,max" strings. One range is fine.
       const lo = Math.max(1, min ?? 1);
       const hi = max ?? 100000;
       body.organization_num_employees_ranges = [`${lo},${hi}`];
@@ -169,6 +228,84 @@ function buildSearchBody(filter: ApolloSearchFilter): Record<string, unknown> {
   }
 
   return body;
+}
+
+function normaliseSearchResponse(raw: unknown): SearchStepResult {
+  const r = raw as {
+    people?: Array<Record<string, unknown>>;
+    contacts?: Array<Record<string, unknown>>;
+    pagination?: { total_entries?: number; total_pages?: number };
+  };
+  const items = r.people ?? r.contacts ?? [];
+  const partials: ApolloContact[] = items.map((c) => normaliseContact(c));
+  return {
+    partials,
+    total_results: r.pagination?.total_entries,
+    total_pages: r.pagination?.total_pages,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Step 2 — enrich Apollo person IDs to get email addresses
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Bulk-match Apollo person IDs to enriched contacts (with email). Apollo's
+ * bulk endpoint accepts up to 10 IDs per call, so we chunk. Each match
+ * consumes Apollo credits; free-tier responses may still come back without
+ * a usable email — those are returned with `email: null` and the caller
+ * should filter them out.
+ */
+export async function enrichPeople(ids: string[]): Promise<ApolloContact[]> {
+  if (ids.length === 0) return [];
+  const out: ApolloContact[] = [];
+  for (const chunk of chunkArray(ids, ENRICH_CHUNK_SIZE)) {
+    const body = {
+      details: chunk.map((id) => ({ id })),
+      reveal_personal_emails: true,
+    };
+    const res = await apolloFetch(ENRICH_PATH, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new ApolloApiError(
+        `Apollo enrichment failed (${res.status})`,
+        res.status,
+        text.slice(0, 1000),
+      );
+    }
+    const json = text ? safeJson(text) : {};
+    out.push(...normaliseEnrichResponse(json));
+  }
+  return out;
+}
+
+function normaliseEnrichResponse(raw: unknown): ApolloContact[] {
+  const r = raw as {
+    matches?: Array<Record<string, unknown>>;
+    people?: Array<Record<string, unknown>>;
+  };
+  // Apollo's bulk_match returns `matches`; fall back to `people` if some
+  // accounts return the alt shape.
+  const items = r.matches ?? r.people ?? [];
+  // Each match may either be the person object directly, or `{ status, person }`.
+  return items.map((m) => {
+    const person =
+      (m.person as Record<string, unknown> | undefined) ?? m;
+    return normaliseContact(person);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
 function safeJson(text: string): unknown {
@@ -179,21 +316,6 @@ function safeJson(text: string): unknown {
   }
 }
 
-function normaliseSearchResponse(raw: unknown): ApolloSearchResult {
-  const r = raw as {
-    people?: Array<Record<string, unknown>>;
-    contacts?: Array<Record<string, unknown>>;
-    pagination?: { total_entries?: number; total_pages?: number };
-  };
-  const items = r.people ?? r.contacts ?? [];
-  const contacts: ApolloContact[] = items.map((c) => normaliseContact(c));
-  return {
-    contacts,
-    total_results: r.pagination?.total_entries,
-    total_pages: r.pagination?.total_pages,
-  };
-}
-
 function normaliseContact(raw: Record<string, unknown>): ApolloContact {
   const get = (key: string): unknown => raw[key];
   const org =
@@ -201,9 +323,13 @@ function normaliseContact(raw: Record<string, unknown>): ApolloContact {
     (raw.account as Record<string, unknown> | undefined) ??
     {};
 
-  const rawEmail = stringOrNull(get("email"));
-  // Apollo returns "email_not_unlocked@..." placeholders for locked contacts.
-  // Treat those as missing so Prospect-01 doesn't insert junk.
+  // Email may live on any of: email, work_email, personal_emails[0].
+  const rawEmail =
+    stringOrNull(get("email")) ??
+    stringOrNull(get("work_email")) ??
+    stringOrNull(firstStringIn(get("personal_emails")));
+  // Apollo returns "email_not_unlocked@..." placeholders for locked
+  // contacts. Treat those as missing so callers don't insert junk.
   const email =
     rawEmail && /email_not_unlocked|^null$/i.test(rawEmail) ? null : rawEmail;
 
@@ -232,6 +358,12 @@ function normaliseContact(raw: Record<string, unknown>): ApolloContact {
       website: stringOrNull(org.website_url ?? org.url),
     },
   };
+}
+
+function firstStringIn(v: unknown): string | null {
+  if (!Array.isArray(v) || v.length === 0) return null;
+  const first = v[0];
+  return typeof first === "string" ? first : null;
 }
 
 function stringOrNull(v: unknown): string | null {

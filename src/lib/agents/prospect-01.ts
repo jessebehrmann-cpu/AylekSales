@@ -4,8 +4,17 @@
  * with source='ai_enriched' + approval_status='pending_approval', and creates
  * a lead_list approval row for the HOS to review.
  *
- * Re-run safe: rate-limited by Apollo + dedup, so calling twice in a row
- * just inserts whatever's new since last time.
+ * Apollo flow is two-step (handled inside lib/apollo.ts):
+ *   1. People Search returns matching person IDs (no email).
+ *   2. Bulk-match enrichment exchanges IDs for full contact records
+ *      WITH email. Each enriched contact consumes Apollo credits; some
+ *      may still come back without a usable email and get dropped.
+ *
+ * The funnel (searched_total → enrichment_attempted → enriched_with_email
+ * → new) is logged on every run so HOS can see where contacts get lost.
+ *
+ * Re-run safe: rate-limited by Apollo + deduped against existing leads,
+ * so calling twice in a row just inserts whatever's new since last time.
  */
 
 import { createServiceClient } from "@/lib/supabase/server";
@@ -22,8 +31,17 @@ import type { ICP, Playbook } from "@/lib/supabase/types";
 export type ProspectRunResult = {
   ok: true;
   client_id: string;
+  /** Total people the Apollo search step matched (pre-enrichment). */
+  searched: number;
+  /** Of `searched`, how many we attempted to enrich for emails. */
+  enrichment_attempted: number;
+  /** Of those enrichment attempts, how many came back with a usable email. */
+  enriched_with_email: number;
+  /** Alias for `enriched_with_email` — number of contacts considered for insert. */
   found: number;
+  /** New leads inserted into the DB after dedup. */
   new: number;
+  /** Enriched contacts dropped because the email was already in our leads table. */
   duplicates: number;
   approval_id: string | null;
   lead_ids: string[];
@@ -68,11 +86,20 @@ export async function runProspect01(
     };
   }
 
-  // 3. Call Apollo
+  // 3. Call Apollo (two-step search → enrich, handled inside the lib).
+  //    `contacts` are only those the enrichment step returned with a real
+  //    email; the search→enrich funnel counts come back on the result so
+  //    we can log them.
   let contacts: ApolloContact[];
+  let searchedTotal = 0;
+  let enrichmentAttempted = 0;
+  let enrichedWithEmail = 0;
   try {
     const result = await searchApolloContacts(filter);
     contacts = result.contacts;
+    searchedTotal = result.searched_total;
+    enrichmentAttempted = result.enrichment_attempted;
+    enrichedWithEmail = result.enriched_with_email;
   } catch (err) {
     if (err instanceof ApolloConfigError) {
       return { ok: false, error: err.message, config_error: true };
@@ -142,7 +169,11 @@ export async function runProspect01(
     insertedLeadIds = (inserted ?? []).map((r: { id: string }) => r.id);
   }
 
-  const duplicates = contacts.length - insertedLeadIds.length - (contacts.length - candidateEmails.length);
+  // Duplicates among the enriched-with-email set: contacts whose email
+  // already existed in our leads table.
+  const duplicates = contacts.length - insertedLeadIds.length;
+  // Apollo search hits dropped at the enrichment step (no email returned).
+  const droppedAtEnrichment = enrichmentAttempted - enrichedWithEmail;
 
   // 6. Create lead_list approval (only if we found new leads)
   let approvalId: string | null = null;
@@ -158,6 +189,12 @@ export async function runProspect01(
       .maybeSingle();
     const campaign = existingCampaign as { id: string; name: string } | null;
 
+    const summaryParts = [
+      `Apollo search matched ${searchedTotal} people; enrichment returned ${enrichedWithEmail} with email (${droppedAtEnrichment} had no usable email).`,
+      `${duplicates} duplicate(s) filtered against existing leads.`,
+      campaign ? `Will enrol into ${campaign.name} on approve.` : "No campaign attached — pick one at approval time.",
+    ];
+
     const { data: appr, error: apprErr } = await supabase
       .from("approvals")
       .insert({
@@ -165,13 +202,16 @@ export async function runProspect01(
         type: "lead_list",
         status: "pending",
         title: `Prospect-01 sourced ${insertedLeadIds.length} new leads`,
-        summary: `Sourced via Apollo against the approved ICP. ${duplicates} duplicate(s) filtered.${campaign ? ` Will enrol into ${campaign.name} on approve.` : " No campaign attached — pick one at approval time."}`,
+        summary: summaryParts.join(" "),
         payload: {
           lead_ids: insertedLeadIds,
           source: "prospect-01",
           campaign_id: campaign?.id ?? null,
           apollo: {
             filter,
+            searched_total: searchedTotal,
+            enrichment_attempted: enrichmentAttempted,
+            enriched_with_email: enrichedWithEmail,
           },
         },
         related_campaign_id: campaign?.id ?? null,
@@ -192,6 +232,10 @@ export async function runProspect01(
     user_id: opts.triggeredBy ?? null,
     payload: {
       kind: "prospect_run",
+      searched: searchedTotal,
+      enrichment_attempted: enrichmentAttempted,
+      enriched_with_email: enrichedWithEmail,
+      dropped_at_enrichment: droppedAtEnrichment,
       found: contacts.length,
       new: insertedLeadIds.length,
       duplicates,
@@ -202,6 +246,9 @@ export async function runProspect01(
   return {
     ok: true,
     client_id: clientId,
+    searched: searchedTotal,
+    enrichment_attempted: enrichmentAttempted,
+    enriched_with_email: enrichedWithEmail,
     found: contacts.length,
     new: insertedLeadIds.length,
     duplicates,
