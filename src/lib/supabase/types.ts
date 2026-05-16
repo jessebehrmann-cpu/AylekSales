@@ -183,6 +183,23 @@ export type ClientEmailConfig = {
   last_error?: string | null;
 };
 
+/** Per-client calendar booking config. Today only Cal.com; future
+ *  providers (Calendly, Google Calendar direct) drop in via the
+ *  `provider` discriminator. */
+export type ClientCalendarConfig = {
+  provider: "cal_com";
+  /** Svix-style signing secret for the booking webhook. */
+  webhook_secret?: string | null;
+  /** Per-team-member Cal.com event-type links. The agent picks one
+   *  based on the playbook's assigned team_member for the lead. */
+  team_member_links: Array<{
+    team_member_id: string;
+    /** "you/30min" — the path under cal.com (no scheme/host). */
+    cal_link: string;
+    event_type?: string;
+  }>;
+};
+
 export type Client = {
   id: string;
   name: string;
@@ -199,6 +216,10 @@ export type Client = {
    *  status !== "verified" the send loops fall back to the global env
    *  vars (RESEND_FROM_EMAIL) and log a warning. */
   email_config: ClientEmailConfig | null;
+  /** Per-client booking config (Cal.com). NULL until configured —
+   *  agents fall back to the deferred-handoff "human" stage when no
+   *  booking link is available. */
+  calendar_config: ClientCalendarConfig | null;
   notes: string | null;
   created_at: string;
 };
@@ -289,6 +310,10 @@ export type Meeting = {
   duration_minutes: number;
   format: MeetingFormat;
   status: MeetingStatus;
+  /** Cal.com booking uid — set on bookings created via webhook. */
+  cal_booking_id: string | null;
+  /** Direct URL for the lead to reschedule/cancel. */
+  cal_booking_url: string | null;
   notes: string | null;
   created_at: string;
 };
@@ -335,7 +360,27 @@ export type ApprovalType =
   | "strategy_change"
   | "human_stage_task"
   | "proposal_review"
-  | "playbook_approval";
+  | "playbook_approval"
+  | "reply_review";
+
+/** Payload for type='reply_review' approvals — drafted by the inbound
+ *  classifier from the playbook's reply_strategy template + the lead's
+ *  actual reply. HOS edits + sends from the approval card. */
+export type ReplyReviewPayload = {
+  lead_id: string;
+  /** ReplyKind from the playbook (interested/not_now/wrong_person/objection). */
+  reply_kind: ReplyKind;
+  /** The inbound text we're replying to — for context in the card. */
+  incoming_subject: string | null;
+  incoming_excerpt: string;
+  drafted_subject: string;
+  drafted_body: string;
+  /** When this is a positive-intent reply we embed the Cal.com booking
+   *  link in the body. Surfaced separately so the card can render a
+   *  "booking link included" indicator. */
+  booking_link?: string | null;
+  ai_warning?: string | null;
+};
 
 export type MeetingOutcome = "positive" | "neutral" | "negative" | "no_show";
 

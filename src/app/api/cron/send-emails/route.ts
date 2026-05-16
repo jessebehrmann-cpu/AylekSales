@@ -6,8 +6,14 @@ import {
   activelySuppressedEmailsIn,
   getUnsubscribeUrl,
 } from "@/lib/suppression";
+import { buildBookingLink, pickTeamMember } from "@/lib/calendar/cal-com";
 import { logEvent } from "@/lib/events";
-import type { SalesProcessStage, SequenceStep } from "@/lib/supabase/types";
+import type {
+  ClientCalendarConfig,
+  Playbook,
+  SalesProcessStage,
+  SequenceStep,
+} from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -65,18 +71,44 @@ export async function GET(req: NextRequest) {
     ),
   );
   const humanStagesByClient = new Map<string, Set<string>>();
+  /** Per-client { calendar_config, playbook (for team_members) } so we
+   *  can resolve {{booking_link}} placeholders in templates. */
+  const calendarByClient = new Map<
+    string,
+    { calendar_config: ClientCalendarConfig | null; team_members: Playbook["team_members"] }
+  >();
   if (distinctClientIds.length > 0) {
     const { data: pbs } = await supabase
       .from("playbooks")
-      .select("client_id, sales_process")
+      .select("client_id, sales_process, team_members")
       .in("client_id", distinctClientIds)
       .eq("status", "approved");
-    for (const row of (pbs ?? []) as Array<{ client_id: string; sales_process: SalesProcessStage[] | null }>) {
+    for (const row of (pbs ?? []) as Array<{
+      client_id: string;
+      sales_process: SalesProcessStage[] | null;
+      team_members: Playbook["team_members"];
+    }>) {
       const set = new Set<string>();
       for (const stage of row.sales_process ?? []) {
         if ((stage.agent ?? "").trim().toLowerCase() === "human") set.add(stage.id);
       }
       humanStagesByClient.set(row.client_id, set);
+      calendarByClient.set(row.client_id, {
+        calendar_config: null,
+        team_members: row.team_members ?? [],
+      });
+    }
+    const { data: clientRows } = await supabase
+      .from("clients")
+      .select("id, calendar_config")
+      .in("id", distinctClientIds);
+    for (const c of (clientRows ?? []) as Array<{
+      id: string;
+      calendar_config: ClientCalendarConfig | null;
+    }>) {
+      const existing = calendarByClient.get(c.id);
+      if (existing) existing.calendar_config = c.calendar_config;
+      else calendarByClient.set(c.id, { calendar_config: c.calendar_config, team_members: [] });
     }
   }
 
@@ -228,11 +260,24 @@ export async function GET(req: NextRequest) {
         },
       });
 
-      // Queue next step
+      // Queue next step (with booking-link substitution if applicable)
       if (campaign?.sequence_steps && row.step_number != null) {
         const steps = campaign.sequence_steps as SequenceStep[];
         const next = steps.find((s) => s.step === (row.step_number as number) + 1);
         if (next) {
+          let bookingLink: string | null = null;
+          if (row.client_id) {
+            const ctx = calendarByClient.get(row.client_id);
+            const member = pickTeamMember({ team_members: ctx?.team_members ?? [] } as Playbook, lead.id);
+            bookingLink = buildBookingLink({
+              clientId: row.client_id,
+              leadId: lead.id,
+              leadEmail: lead.email,
+              leadContactName: lead.contact_name,
+              teamMember: member,
+              calendarConfig: ctx?.calendar_config ?? null,
+            });
+          }
           const sendAt = new Date(Date.now() + next.delay_days * 24 * 60 * 60 * 1000).toISOString();
           await supabase.from("emails").insert({
             lead_id: lead.id,
@@ -240,8 +285,8 @@ export async function GET(req: NextRequest) {
             campaign_id: row.campaign_id,
             direction: "outbound",
             step_number: next.step,
-            subject: substitute(next.subject, lead),
-            body: substitute(next.body, lead),
+            subject: substitute(next.subject, lead, { booking_link: bookingLink }),
+            body: substitute(next.body, lead, { booking_link: bookingLink }),
             status: "pending",
             send_at: sendAt,
           });
@@ -316,8 +361,13 @@ type PendingEmail = {
   } | null;
 };
 
-function substitute(template: string, lead: { contact_name?: string | null; company_name?: string | null }): string {
+function substitute(
+  template: string,
+  lead: { contact_name?: string | null; company_name?: string | null },
+  extras: { booking_link?: string | null } = {},
+): string {
   return template
     .replace(/\{\{\s*contact_name\s*\}\}/gi, lead.contact_name?.split(" ")[0] ?? "there")
-    .replace(/\{\{\s*company_name\s*\}\}/gi, lead.company_name ?? "your team");
+    .replace(/\{\{\s*company_name\s*\}\}/gi, lead.company_name ?? "your team")
+    .replace(/\{\{\s*booking_link\s*\}\}/gi, extras.booking_link ?? "");
 }

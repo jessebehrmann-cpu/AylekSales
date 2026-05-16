@@ -381,6 +381,130 @@ export async function approveProposalReview(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Reply review decisions (inbound auto-classifier draft)
+// ──────────────────────────────────────────────────────────────────────────
+
+const ReplyReviewSchema = z.object({
+  approval_id: z.string().uuid(),
+  edited_subject: z.string().min(1).max(200).optional(),
+  edited_body: z.string().min(1).max(20000).optional(),
+});
+
+/**
+ * HOS approves a reply_review approval. Sends the (possibly edited)
+ * drafted response via Resend (per-client sending domain), records the
+ * outbound email row, marks the approval approved. Used by the Approve
+ * & Send button on the reply_review card.
+ */
+export async function approveReplyReview(
+  input: unknown,
+): Promise<ActionResult<{ email_id: string | null }>> {
+  try {
+    const user = await requireUser();
+    const parsed = ReplyReviewSchema.safeParse(input);
+    if (!parsed.success) return { ok: false, error: "Invalid input" };
+    const supabase = createClient();
+
+    const { data: apprRow } = await supabase
+      .from("approvals")
+      .select("*")
+      .eq("id", parsed.data.approval_id)
+      .maybeSingle();
+    if (!apprRow) return { ok: false, error: "Approval not found" };
+    const approval = apprRow as Approval;
+    if (approval.type !== "reply_review") {
+      return { ok: false, error: "Not a reply_review approval" };
+    }
+    if (approval.status !== "pending") {
+      return { ok: false, error: `Already ${approval.status}` };
+    }
+
+    const payload = (approval.payload ?? {}) as Partial<{
+      lead_id: string;
+      drafted_subject: string;
+      drafted_body: string;
+      incoming_subject: string | null;
+    }>;
+    const subject = parsed.data.edited_subject ?? payload.drafted_subject ?? "";
+    const body = parsed.data.edited_body ?? payload.drafted_body ?? "";
+    if (!payload.lead_id || !subject || !body) {
+      return { ok: false, error: "Approval has no lead / subject / body." };
+    }
+
+    // Find the lead's email + client.
+    const { data: leadRow } = await supabase
+      .from("leads")
+      .select("id, email, client_id")
+      .eq("id", payload.lead_id)
+      .maybeSingle();
+    const lead = leadRow as
+      | { id: string; email: string | null; client_id: string | null }
+      | null;
+    if (!lead?.email) {
+      return { ok: false, error: "Lead has no email address — cannot send." };
+    }
+
+    const sendingCfg = await getClientSendingConfig(supabase, lead.client_id);
+    const finalSubject = subject.startsWith("Re:")
+      ? subject
+      : payload.incoming_subject
+        ? `Re: ${payload.incoming_subject.replace(/^Re:\s*/i, "")}`
+        : subject;
+
+    let resendId: string | null = null;
+    try {
+      const result = await resend.emails.send({
+        from: sendingCfg.from,
+        to: lead.email,
+        subject: finalSubject,
+        text: body,
+        replyTo: sendingCfg.reply_to,
+      });
+      if (result.error) throw new Error(result.error.message);
+      resendId = result.data?.id ?? null;
+    } catch (sendErr) {
+      const msg = sendErr instanceof Error ? sendErr.message : String(sendErr);
+      return { ok: false, error: `Resend send failed: ${msg}` };
+    }
+
+    const now = new Date().toISOString();
+    const { data: emailRow } = await supabase
+      .from("emails")
+      .insert({
+        lead_id: lead.id,
+        client_id: lead.client_id,
+        direction: "outbound" as const,
+        subject: finalSubject,
+        body,
+        status: "sent" as const,
+        sent_at: now,
+        resend_message_id: resendId,
+      })
+      .select("id")
+      .single();
+
+    await supabase
+      .from("approvals")
+      .update({ status: "approved", approved_by: user.auth.id, decided_at: now })
+      .eq("id", approval.id);
+
+    await logEvent({
+      event_type: "email_sent",
+      lead_id: lead.id,
+      client_id: lead.client_id,
+      payload: { kind: "reply_sent", approval_id: approval.id, subject: finalSubject },
+    });
+
+    revalidatePath("/approvals");
+    revalidatePath(`/leads/${lead.id}`);
+    revalidatePath("/dashboard");
+    return { ok: true, email_id: (emailRow as { id?: string } | null)?.id ?? null };
+  } catch (err) {
+    return actionError(err);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Per-lead decisions inside a lead_list approval
 // ──────────────────────────────────────────────────────────────────────────
 

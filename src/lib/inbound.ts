@@ -6,10 +6,15 @@ import {
   isAnthropicUnavailableError,
   parseJsonResponse,
 } from "@/lib/anthropic";
-import { resend, FROM_EMAIL } from "@/lib/resend";
-import { getClientSendingConfig } from "@/lib/email-config";
 import { suppress } from "@/lib/suppression";
+import { buildBookingLink, pickTeamMember } from "@/lib/calendar/cal-com";
 import { logEvent } from "@/lib/events";
+import type {
+  ClientCalendarConfig,
+  Playbook,
+  ReplyKind,
+  ReplyReviewPayload,
+} from "@/lib/supabase/types";
 
 /** Catch obvious unsubscribe phrasing in the inbound body/subject before
  *  spending a Claude call. Conservative — only trigger when the contact
@@ -28,11 +33,9 @@ export type InboundEmail = {
 };
 
 type Qualification = {
+  reply_kind: ReplyKind;
   is_genuine: boolean;
   quality: "hot" | "warm" | "cold";
-  estimated_size: "small" | "medium" | "large";
-  suggested_response: string;
-  next_action: "send_quote" | "book_meeting" | "request_more_info" | "disqualify";
   reasoning: string;
 };
 
@@ -148,31 +151,92 @@ export async function processInboundEmail(payload: InboundEmail): Promise<void> 
     },
   });
 
-  // ── AI qualification ──────────────────────────────────────────────────────
+  // ── Classify the reply + draft a response into a reply_review approval ──
   if (isAnthropicKeyMissing()) {
-    console.warn("[inbound] ANTHROPIC_API_KEY missing — skipping AI qualification");
+    console.warn("[inbound] ANTHROPIC_API_KEY missing — skipping reply classification");
     return;
   }
 
-  try {
-    const system =
-      "You are an AI sales assistant for a B2B company. You assess inbound enquiries quickly and write warm, direct responses. Never quote prices.";
+  // Load playbook (for reply_strategy + team_members) + calendar_config.
+  let playbook: Playbook | null = null;
+  let calendarConfig: ClientCalendarConfig | null = null;
+  if (clientId) {
+    const { data: pb } = await supabase
+      .from("playbooks")
+      .select("*")
+      .eq("client_id", clientId)
+      .eq("status", "approved")
+      .maybeSingle();
+    playbook = (pb as Playbook | null) ?? null;
+    const { data: cl } = await supabase
+      .from("clients")
+      .select("calendar_config")
+      .eq("id", clientId)
+      .maybeSingle();
+    calendarConfig =
+      (cl as { calendar_config?: ClientCalendarConfig | null } | null)?.calendar_config ??
+      null;
+  }
 
-    const prompt = `Inbound email from ${payload.from_name || fromEmail} <${fromEmail}>:
+  // Classify (single Claude call) + draft the response anchored on the
+  // playbook's reply_strategy template (if present).
+  try {
+    const replyStrategy = playbook?.reply_strategy ?? {};
+    const voiceTone = playbook?.voice_tone ?? {};
+    const teamMember = playbook && leadId ? pickTeamMember(playbook, leadId) : null;
+    const bookingLink =
+      clientId && leadId
+        ? buildBookingLink({
+            clientId,
+            leadId,
+            leadEmail: fromEmail,
+            leadContactName: payload.from_name ?? null,
+            teamMember,
+            calendarConfig,
+          })
+        : null;
+
+    const system = `You are an AI sales assistant. Classify an inbound reply into one of these ReplyKind values, then draft a professional response in the supplied voice & tone.
+
+ReplyKind values:
+- interested: lead is open / wants more info / wants to book a meeting.
+- not_now: politely declining, asks to follow up later.
+- wrong_person: not the right contact at the company.
+- objection: pushing back on something specific (price, fit, timing).
+
+You ALWAYS return a single JSON object, no markdown:
+{
+  "reply_kind": "interested" | "not_now" | "wrong_person" | "objection",
+  "is_genuine": true | false,
+  "quality": "hot" | "warm" | "cold",
+  "reasoning": "one sentence",
+  "drafted_subject": "...",
+  "drafted_body": "..."
+}
+
+Drafted body rules:
+- Match the supplied voice & tone exactly.
+- 3-5 sentences max. No greeting like "Hi {{contact_name}}" unless the voice prefers it.
+- If reply_kind=interested AND a booking link is supplied, embed it explicitly so the prospect can self-book.
+- If reply_kind=wrong_person, ask politely for the right contact.
+- Never quote price. Never use template language ("circling back", "synergy", "just touching base").
+- Use the reply_strategy.<kind>.template as a starting point when supplied.`;
+
+    const prompt = `Inbound from ${payload.from_name || fromEmail} <${fromEmail}>
 
 Subject: ${payload.subject ?? "(no subject)"}
 
 ${payload.text ?? "(no body)"}
 
-Assess:
-1. Is this a genuine inbound sales enquiry? (true/false)
-2. Lead quality: "hot" / "warm" / "cold"
-3. Estimated contract size: "small" / "medium" / "large"
-4. Write a suggested response email body (3-5 sentences max, no greeting line, sign off as "Aylek Sales").
-5. Next action: "send_quote" / "book_meeting" / "request_more_info" / "disqualify"
-6. One sentence of reasoning.
+PLAYBOOK reply_strategy (templates we'd prefer to use as starting points):
+${JSON.stringify(replyStrategy, null, 2)}
 
-Return ONLY valid JSON with these keys: is_genuine, quality, estimated_size, suggested_response, next_action, reasoning. No markdown.`;
+VOICE & TONE:
+${JSON.stringify(voiceTone, null, 2)}
+
+${bookingLink ? `BOOKING LINK (embed verbatim in body when reply_kind=interested):\n${bookingLink}\n` : ""}
+
+Classify and draft.`;
 
     const response = await anthropic.messages.create({
       model: ANTHROPIC_MODEL,
@@ -180,9 +244,10 @@ Return ONLY valid JSON with these keys: is_genuine, quality, estimated_size, sug
       system,
       messages: [{ role: "user", content: prompt }],
     });
-
     const text = response.content[0]?.type === "text" ? response.content[0].text : "";
-    const q = parseJsonResponse<Qualification>(text);
+    const q = parseJsonResponse<
+      Qualification & { drafted_subject?: string; drafted_body?: string }
+    >(text);
 
     await logEvent({
       service: true,
@@ -191,57 +256,45 @@ Return ONLY valid JSON with these keys: is_genuine, quality, estimated_size, sug
       client_id: clientId,
       payload: {
         lead_name: leadName,
+        reply_kind: q.reply_kind,
         quality: q.quality,
-        estimated_size: q.estimated_size,
-        next_action: q.next_action,
         reasoning: q.reasoning,
       },
     });
 
-    if (q.is_genuine && q.next_action !== "disqualify") {
-      // Auto-send the AI's suggested reply, from the per-client domain.
-      const sendingCfg = await getClientSendingConfig(supabase, clientId);
-      try {
-        const sendResult = await resend.emails.send({
-          from: sendingCfg.from,
-          to: fromEmail,
-          subject: payload.subject ? `Re: ${payload.subject.replace(/^Re:\s*/i, "")}` : "Thanks for getting in touch",
-          text: q.suggested_response,
-          replyTo: sendingCfg.reply_to,
-        });
-        if (sendResult.error) throw new Error(sendResult.error.message);
-
-        await supabase.from("emails").insert({
-          lead_id: leadId,
-          client_id: clientId,
-          direction: "outbound",
-          subject: payload.subject ? `Re: ${payload.subject.replace(/^Re:\s*/i, "")}` : "Thanks for getting in touch",
-          body: q.suggested_response,
-          status: "sent",
-          sent_at: new Date().toISOString(),
-          resend_message_id: sendResult.data?.id ?? null,
-        });
-
-        await logEvent({
-          service: true,
-          event_type: "ai_action",
-          lead_id: leadId,
-          client_id: clientId,
-          payload: {
-            kind: "auto_reply_sent",
-            lead_name: leadName,
-            next_action: q.next_action,
-          },
-        });
-      } catch (sendErr) {
-        console.error("[inbound] auto-reply send failed", sendErr);
-      }
+    if (!q.drafted_subject || !q.drafted_body) {
+      console.warn("[inbound] Claude returned no draft — no reply_review created");
+      return;
     }
+
+    // Don't create reply_reviews without a client_id (approvals.client_id
+    // is NOT NULL). Orphaned inbounds get logged only.
+    if (!clientId || !leadId) return;
+
+    const replyPayload: ReplyReviewPayload = {
+      lead_id: leadId,
+      reply_kind: q.reply_kind,
+      incoming_subject: payload.subject ?? null,
+      incoming_excerpt: (payload.text ?? "").slice(0, 500),
+      drafted_subject: q.drafted_subject.slice(0, 200),
+      drafted_body: q.drafted_body,
+      booking_link: bookingLink,
+    };
+
+    await supabase.from("approvals").insert({
+      client_id: clientId,
+      type: "reply_review",
+      status: "pending",
+      title: `${leadName}: review reply (${q.reply_kind})`,
+      summary: `Inbound classified as ${q.reply_kind} (${q.quality}). Drafted response ready — HOS to review + send.`,
+      payload: replyPayload as unknown as Record<string, unknown>,
+      related_playbook_id: playbook?.id ?? null,
+    });
   } catch (qualifyErr) {
     if (isAnthropicUnavailableError(qualifyErr)) {
-      console.warn("[inbound] Anthropic unavailable — qualification skipped");
+      console.warn("[inbound] Anthropic unavailable — classification skipped");
     } else {
-      console.error("[inbound] qualification failed", qualifyErr);
+      console.error("[inbound] classification failed", qualifyErr);
     }
   }
 }

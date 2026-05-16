@@ -30,13 +30,19 @@ import {
   ChevronUp,
   BookOpen,
 } from "lucide-react";
-import { approveApproval, approveProposalReview, rejectApproval } from "./actions";
+import {
+  approveApproval,
+  approveProposalReview,
+  approveReplyReview,
+  rejectApproval,
+} from "./actions";
 import type {
   Approval,
   HumanStageTaskPayload,
   LeadListPayload,
   PlaybookApprovalPayload,
   ProposalReviewPayload,
+  ReplyReviewPayload,
   StrategyChangePayload,
 } from "@/lib/supabase/types";
 import { formatDateTime } from "@/lib/utils";
@@ -82,6 +88,9 @@ export function ApprovalCard({
         )}
         {approval.type === "playbook_approval" && (
           <PlaybookApprovalBody approval={approval} isPending={isPending} />
+        )}
+        {approval.type === "reply_review" && (
+          <ReplyReviewBody approval={approval} isPending={isPending} />
         )}
 
         {!isPending && approval.decided_at && (
@@ -134,6 +143,8 @@ function headerMetaFor(type: Approval["type"]) {
         icon: BookOpen,
         iconBg: "bg-violet-100 text-violet-700",
       };
+    case "reply_review":
+      return { label: "Reply review", icon: Mail, iconBg: "bg-blue-100 text-blue-700" };
     default:
       return { label: String(type), icon: Search, iconBg: "bg-muted text-muted-foreground" };
   }
@@ -618,6 +629,138 @@ function PlaybookApprovalBody({
           </Button>
           <Button variant="outline" onClick={onReject} disabled={pending} size="sm">
             <X className="mr-1.5 h-3 w-3" /> Reject
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ReplyReviewBody({
+  approval,
+  isPending,
+}: {
+  approval: ApprovalRow;
+  isPending: boolean;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(true);
+
+  const p = (approval.payload ?? {}) as Partial<ReplyReviewPayload>;
+  const [subject, setSubject] = useState(p.drafted_subject ?? "");
+  const [body, setBody] = useState(p.drafted_body ?? "");
+
+  function onApprove() {
+    setError(null);
+    if (!subject.trim() || !body.trim()) {
+      setError("Subject and body are required.");
+      return;
+    }
+    if (!confirm("Send this reply?")) return;
+    start(async () => {
+      const r = await approveReplyReview({
+        approval_id: approval.id,
+        edited_subject: subject.trim(),
+        edited_body: body.trim(),
+      });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+  function onReject() {
+    setError(null);
+    if (!confirm("Reject this draft? It won't be sent.")) return;
+    start(async () => {
+      const r = await rejectApproval({ id: approval.id });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  return (
+    <>
+      {approval.summary && (
+        <p className="mb-3 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          {approval.summary}
+        </p>
+      )}
+      {p.reply_kind && (
+        <p className="mb-2 text-xs text-muted-foreground">
+          Reply kind: <strong className="text-foreground">{p.reply_kind}</strong>
+          {p.booking_link && (
+            <>
+              {" · "}
+              <span className="text-emerald-700">Booking link embedded</span>
+            </>
+          )}
+        </p>
+      )}
+      {p.incoming_excerpt && (
+        <div className="mb-3 rounded-md border border-border/60 bg-muted/30 p-3 text-xs">
+          <p className="text-muted-foreground">
+            They wrote {p.incoming_subject ? `(subject "${p.incoming_subject}")` : ""}:
+          </p>
+          <p className="mt-1 whitespace-pre-wrap text-foreground/80">{p.incoming_excerpt}</p>
+        </div>
+      )}
+
+      <div className="rounded-lg border bg-background">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm font-medium hover:bg-muted/50"
+        >
+          <span>Drafted reply</span>
+          {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </button>
+        {open && (
+          <div className="space-y-3 border-t px-3 py-3">
+            <div className="space-y-1.5">
+              <Label htmlFor={`reply-subj-${approval.id}`} className="text-xs uppercase tracking-wider">
+                Subject
+              </Label>
+              <Input
+                id={`reply-subj-${approval.id}`}
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                disabled={!isPending}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor={`reply-body-${approval.id}`} className="text-xs uppercase tracking-wider">
+                Body
+              </Label>
+              <Textarea
+                id={`reply-body-${approval.id}`}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                rows={10}
+                disabled={!isPending}
+                className="font-mono text-xs"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {error && <Alert variant="destructive" className="mt-3">{error}</Alert>}
+
+      {isPending && (
+        <div className="mt-4 flex gap-2">
+          <Button onClick={onApprove} disabled={pending} size="sm">
+            <Mail className="mr-1.5 h-3 w-3" />
+            {pending ? "Sending…" : "Approve & Send"}
+          </Button>
+          <Button variant="outline" onClick={onReject} disabled={pending} size="sm">
+            <X className="mr-1.5 h-3 w-3" /> Reject draft
           </Button>
         </div>
       )}
