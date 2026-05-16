@@ -57,5 +57,22 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
+  // client_owner users are scoped to their portal — they never need the
+  // admin dashboard / client editor. Redirect them away from those
+  // routes. The portal layout itself handles auth.
+  if (user && !pathname.startsWith("/portal") && !pathname.startsWith("/api/") && !pathname.startsWith("/_next")) {
+    const { data: profileRow } = await supabase
+      .from("users")
+      .select("role")
+      .eq("id", user.id)
+      .maybeSingle();
+    const role = (profileRow as { role?: string } | null)?.role;
+    if (role === "client_owner") {
+      const url = request.nextUrl.clone();
+      url.pathname = "/portal";
+      return NextResponse.redirect(url);
+    }
+  }
+
   return response;
 }

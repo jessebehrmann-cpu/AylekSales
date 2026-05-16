@@ -10,7 +10,8 @@ import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { EditClientForm } from "./edit-client-form";
 import { RunProspectButton } from "./run-prospect-button";
 import { OnboardingTimelineCard } from "./onboarding-timeline";
-import { ExternalLink, Users, Send } from "lucide-react";
+import { InviteOwnerForm } from "./invite-owner-form";
+import { ExternalLink, Users, Send, UserCircle } from "lucide-react";
 import { resolveProviders } from "@/lib/agents/providers";
 import type { OnboardingSession } from "@/lib/supabase/types";
 
@@ -119,6 +120,24 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           )}
         </CardHeader>
       </Card>
+
+      {isAdmin && (
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <UserCircle className="h-4 w-4" /> Client owner access
+            </CardTitle>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Invite the {client.name} side to a read-only portal where they
+              can watch their pipeline + activity. Their account is RLS-scoped
+              to this client only.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <InviteOwnerForm clientId={client.id} />
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="mt-6">
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
