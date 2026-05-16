@@ -2,6 +2,10 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { resend, FROM_EMAIL } from "@/lib/resend";
 import { getClientSendingConfigOrBlock } from "@/lib/email-config";
+import {
+  activelySuppressedEmailsIn,
+  getUnsubscribeUrl,
+} from "@/lib/suppression";
 import { logEvent } from "@/lib/events";
 import type { SalesProcessStage, SequenceStep } from "@/lib/supabase/types";
 
@@ -76,6 +80,14 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // Pre-fetch the suppression list for everyone in this batch — one
+  // round-trip vs N. Any lead whose email is on the global suppression
+  // list gets their pending emails cancelled outright.
+  const batchEmails = (pending as PendingEmail[])
+    .map((r) => r.leads?.email)
+    .filter((e): e is string => !!e);
+  const suppressedSet = await activelySuppressedEmailsIn(supabase, batchEmails);
+
   let sent = 0;
   let skipped = 0;
   let failed = 0;
@@ -92,6 +104,12 @@ export async function GET(req: NextRequest) {
 
     if (lead.stage === "unsubscribed" || lead.stage === "won" || lead.stage === "lost") {
       await cancelRemaining(row, "stage_blocked");
+      skipped++;
+      continue;
+    }
+
+    if (suppressedSet.has(lead.email.trim().toLowerCase())) {
+      await cancelRemaining(row, "globally_suppressed");
       skipped++;
       continue;
     }
@@ -157,13 +175,24 @@ export async function GET(req: NextRequest) {
       sendingReplyTo = cfg.config.reply_to;
     }
 
+    // Build the body with a unique unsubscribe link appended. Compliance
+    // requirement: every outbound MUST carry a working unsubscribe.
+    const unsubscribeUrl = await getUnsubscribeUrl(supabase, {
+      email: lead.email,
+      clientId: row.client_id,
+      leadId: lead.id,
+    });
+    const bodyWithUnsub = unsubscribeUrl
+      ? `${row.body ?? ""}\n\n—\nDon't want to hear from us? ${unsubscribeUrl}`
+      : row.body ?? "";
+
     // Send via Resend
     try {
       const result = await resend.emails.send({
         from: sendingFrom,
         to: lead.email,
         subject: row.subject ?? "",
-        text: row.body ?? "",
+        text: bodyWithUnsub,
         replyTo: sendingReplyTo,
       });
       if (result.error) throw new Error(result.error.message);

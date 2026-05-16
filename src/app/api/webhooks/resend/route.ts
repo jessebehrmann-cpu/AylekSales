@@ -3,6 +3,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { verifySvixSignature } from "@/lib/webhooks";
 import { logEvent } from "@/lib/events";
 import { processInboundEmail, type InboundEmail } from "@/lib/inbound";
+import { suppress } from "@/lib/suppression";
 
 export const dynamic = "force-dynamic";
 
@@ -88,9 +89,29 @@ export async function POST(req: NextRequest) {
     case "email.bounced":
     case "email.complained":
       await supabase.from("emails").update({ status: "bounced" }).eq("id", emailRow.id);
-      // Auto-unsubscribe lead on hard bounce / complaint
+      // Auto-unsubscribe lead on hard bounce / complaint + add their
+      // email to the global suppression list so no other client ever
+      // hits the same address.
       if (emailRow.lead_id) {
-        await supabase.from("leads").update({ stage: "unsubscribed" }).eq("id", emailRow.lead_id);
+        const { data: leadRow } = await supabase
+          .from("leads")
+          .select("email")
+          .eq("id", emailRow.lead_id)
+          .maybeSingle();
+        await supabase
+          .from("leads")
+          .update({ stage: "unsubscribed" })
+          .eq("id", emailRow.lead_id);
+        const leadEmail = (leadRow as { email?: string | null } | null)?.email;
+        if (leadEmail) {
+          await suppress(supabase, {
+            email: leadEmail,
+            reason: type === "email.complained" ? "complaint" : "bounce",
+            sourceLeadId: emailRow.lead_id,
+            sourceClientId: emailRow.client_id,
+            notes: `Resend ${type} on message ${messageId}`,
+          });
+        }
       }
       await logEvent({
         service: true,

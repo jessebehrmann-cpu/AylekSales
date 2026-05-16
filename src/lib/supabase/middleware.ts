@@ -40,7 +40,9 @@ export async function updateSession(request: NextRequest) {
     // Public onboarding interview link sent to client contacts after the
     // proposal email goes out. No login required — gated by the unique token.
     pathname.startsWith("/onboard/") ||
-    pathname.startsWith("/api/onboarding/");
+    pathname.startsWith("/api/onboarding/") ||
+    // Public unsubscribe link in every outbound. No login — gated by token.
+    pathname.startsWith("/u/");
 
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();

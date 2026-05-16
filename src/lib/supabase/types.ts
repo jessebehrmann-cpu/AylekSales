@@ -101,6 +101,15 @@ export type Database = {
         Update: Partial<OnboardingSession>;
         Relationships: [];
       };
+      suppressed_emails: {
+        Row: SuppressedEmail;
+        Insert: Partial<Omit<SuppressedEmail, "email" | "reason">> & {
+          email: string;
+          reason: SuppressedEmailReason;
+        };
+        Update: Partial<SuppressedEmail>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;
@@ -666,4 +675,22 @@ export type PlaybookApprovalPayload = {
   client_id: string;
   client_name: string;
   feedback_round_count: number;
+};
+
+// ── Suppression list ──────────────────────────────────────────────────────
+
+export type SuppressedEmailReason =
+  | "unsubscribe"
+  | "bounce"
+  | "complaint"
+  | "manual";
+
+export type SuppressedEmail = {
+  email: string;
+  reason: SuppressedEmailReason;
+  source_lead_id: string | null;
+  source_client_id: string | null;
+  notes: string | null;
+  unsubscribe_token: string;
+  suppressed_at: string;
 };

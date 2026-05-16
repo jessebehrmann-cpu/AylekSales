@@ -8,7 +8,14 @@ import {
 } from "@/lib/anthropic";
 import { resend, FROM_EMAIL } from "@/lib/resend";
 import { getClientSendingConfig } from "@/lib/email-config";
+import { suppress } from "@/lib/suppression";
 import { logEvent } from "@/lib/events";
+
+/** Catch obvious unsubscribe phrasing in the inbound body/subject before
+ *  spending a Claude call. Conservative — only trigger when the contact
+ *  has explicitly asked. */
+const UNSUB_REGEX =
+  /\b(unsubscribe|remove me|take me off|do not (contact|email)|stop emailing|please stop)\b/i;
 
 export type InboundEmail = {
   from_email: string;
@@ -51,6 +58,42 @@ export async function processInboundEmail(payload: InboundEmail): Promise<void> 
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  // Fast-path: explicit unsubscribe text in body or subject. Suppress
+  // immediately, flip lead.stage to unsubscribed, and bail before
+  // spending a Claude call.
+  const haystack = `${payload.subject ?? ""}\n${payload.text ?? ""}`;
+  if (UNSUB_REGEX.test(haystack)) {
+    if (existing?.id) {
+      await supabase
+        .from("leads")
+        .update({ stage: "unsubscribed" })
+        .eq("id", existing.id);
+      await supabase
+        .from("emails")
+        .update({ status: "failed" })
+        .eq("lead_id", existing.id)
+        .eq("status", "pending");
+    }
+    await suppress(supabase, {
+      email: fromEmail,
+      reason: "unsubscribe",
+      sourceLeadId: existing?.id ?? null,
+      sourceClientId: existing?.client_id ?? null,
+      notes: `Inbound reply matched unsubscribe regex: subject="${(payload.subject ?? "").slice(0, 80)}"`,
+    });
+    await logEvent({
+      service: true,
+      event_type: "inbound_received",
+      lead_id: existing?.id ?? null,
+      client_id: existing?.client_id ?? null,
+      payload: {
+        kind: "unsubscribe_request",
+        from_email: fromEmail,
+      },
+    });
+    return;
+  }
 
   let leadId = existing?.id ?? null;
   let clientId = existing?.client_id ?? null;
