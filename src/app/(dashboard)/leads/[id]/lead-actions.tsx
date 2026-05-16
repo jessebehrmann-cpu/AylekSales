@@ -14,7 +14,7 @@ import {
   updateLeadStage,
 } from "../actions";
 import type { LeadStage } from "@/lib/supabase/types";
-import { Trash2, Ban, CheckCircle2 } from "lucide-react";
+import { Trash2, Ban, CheckCircle2, Trophy, ThumbsDown } from "lucide-react";
 
 const STAGES: LeadStage[] = [
   "new",
@@ -92,6 +92,62 @@ export function NoteForm({ leadId }: { leadId: string }) {
         </Button>
       </div>
     </form>
+  );
+}
+
+export function MarkWonButton({ leadId }: { leadId: string }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  function onClick() {
+    if (!confirm("Mark this lead as Won? You can edit the contract value on the lead detail.")) return;
+    start(async () => {
+      const r = await updateLeadStage(leadId, "won");
+      if (!r.ok) {
+        alert(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+      onClick={onClick}
+      disabled={pending}
+    >
+      <Trophy className="mr-1.5 h-3.5 w-3.5" />
+      {pending ? "Saving…" : "Mark won"}
+    </Button>
+  );
+}
+
+export function MarkLostButton({ leadId }: { leadId: string }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  function onClick() {
+    if (!confirm("Mark this lead as Lost? It will stop receiving outreach.")) return;
+    start(async () => {
+      const r = await updateLeadStage(leadId, "lost");
+      if (!r.ok) {
+        alert(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="border-rose-300 bg-rose-50 text-rose-800 hover:bg-rose-100"
+      onClick={onClick}
+      disabled={pending}
+    >
+      <ThumbsDown className="mr-1.5 h-3.5 w-3.5" />
+      {pending ? "Saving…" : "Mark lost"}
+    </Button>
   );
 }
 

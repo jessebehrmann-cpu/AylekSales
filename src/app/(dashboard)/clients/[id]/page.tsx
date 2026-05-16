@@ -121,19 +121,34 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
         </CardHeader>
       </Card>
 
-      <Card className="mt-6">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <div>
-            <CardTitle className="text-base">Usage + spend</CardTitle>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Month-to-date upstream API spend (Apollo, Hunter, Claude, Resend).
-            </p>
-          </div>
-          <Button asChild variant="outline" size="sm">
-            <Link href={`/clients/${client.id}/usage`}>View</Link>
-          </Button>
-        </CardHeader>
-      </Card>
+      <div className="mt-6 grid gap-4 md:grid-cols-2">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle className="text-base">Usage + spend</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Month-to-date upstream API spend.
+              </p>
+            </div>
+            <Button asChild variant="outline" size="sm">
+              <Link href={`/clients/${client.id}/usage`}>View</Link>
+            </Button>
+          </CardHeader>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle className="text-base">Funnel report</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Conversion at each stage + time-in-stage.
+              </p>
+            </div>
+            <Button asChild variant="outline" size="sm">
+              <Link href={`/clients/${client.id}/report`}>View</Link>
+            </Button>
+          </CardHeader>
+        </Card>
+      </div>
 
       {isAdmin && (
         <Card className="mt-6">

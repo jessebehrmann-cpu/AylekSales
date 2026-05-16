@@ -4,7 +4,9 @@ import { useState } from "react";
 import { ApprovalBadge } from "@/components/approval-badge";
 import {
   DeleteLeadButton,
+  MarkLostButton,
   MarkStageCompleteButton,
+  MarkWonButton,
   UnsubscribeLeadButton,
 } from "./lead-actions";
 import { PostMeetingModal } from "./post-meeting-modal";
@@ -46,6 +48,12 @@ export function LeadDetailHeaderActions({
                 : undefined
             }
           />
+        )}
+        {leadStage !== "won" && leadStage !== "lost" && leadStage !== "unsubscribed" && (
+          <>
+            <MarkWonButton leadId={leadId} />
+            <MarkLostButton leadId={leadId} />
+          </>
         )}
         <UnsubscribeLeadButton
           leadId={leadId}
