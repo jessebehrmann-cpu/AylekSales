@@ -11,7 +11,8 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { resend, FROM_EMAIL } from "@/lib/resend";
+import { resend } from "@/lib/resend";
+import { getClientSendingConfig } from "@/lib/email-config";
 import { logEvent } from "@/lib/events";
 import type { Database, OnboardingSession } from "@/lib/supabase/types";
 
@@ -73,12 +74,15 @@ export async function spawnOnboardingSession(
   }
   const session = row as OnboardingSession;
 
-  // 3. Send email
+  // 3. Send email — use the client's verified sending domain if set.
+  const sendingCfg = await getClientSendingConfig(supabase, args.clientId);
   const sendResult = await sendOnboardingEmail({
     contactEmail: args.contactEmail,
     contactName: args.contactName,
     clientName: args.clientName,
     token: session.token,
+    from: sendingCfg.from,
+    replyTo: sendingCfg.reply_to,
   });
 
   // 4. Stamp sent_at + flip status
@@ -131,11 +135,14 @@ export async function resendOnboardingEmail(
   if (!r) return { ok: false, error: "Onboarding session not found" };
   if (!r.leads?.email) return { ok: false, error: "Linked lead has no email address" };
 
+  const sendingCfg = await getClientSendingConfig(supabase, r.client_id);
   const sendResult = await sendOnboardingEmail({
     contactEmail: r.leads.email,
     contactName: r.leads.contact_name ?? null,
     clientName: r.clients?.name ?? "your team",
     token: r.token,
+    from: sendingCfg.from,
+    replyTo: sendingCfg.reply_to,
   });
 
   if (sendResult.ok) {
@@ -159,6 +166,8 @@ async function sendOnboardingEmail(args: {
   contactName: string | null;
   clientName: string;
   token: string;
+  from: string;
+  replyTo: string;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
   const link = `${baseUrl}/onboard/${args.token}`;
@@ -181,11 +190,11 @@ Aylek Sales`;
 
   try {
     const result = await resend.emails.send({
-      from: FROM_EMAIL,
+      from: args.from,
       to: args.contactEmail,
       subject,
       text: body,
-      replyTo: FROM_EMAIL,
+      replyTo: args.replyTo,
     });
     if (result.error) throw new Error(result.error.message);
     return { ok: true };

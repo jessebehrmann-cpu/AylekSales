@@ -7,6 +7,7 @@ import { requireUser } from "@/lib/auth";
 import { logEvent } from "@/lib/events";
 import { actionError, type ActionResult } from "@/lib/actions";
 import { resend, FROM_EMAIL } from "@/lib/resend";
+import { getClientSendingConfig } from "@/lib/email-config";
 import { spawnOnboardingSession } from "@/lib/onboarding-trigger";
 import type {
   Approval,
@@ -290,15 +291,16 @@ export async function approveProposalReview(
       leads: { email: leadEmail },
     };
 
-    // Send via Resend
+    // Send via Resend — use the per-client verified domain when set.
+    const sendingCfg = await getClientSendingConfig(supabase, note.client_id);
     let resendId: string | null = null;
     try {
       const result = await resend.emails.send({
-        from: FROM_EMAIL,
+        from: sendingCfg.from,
         to: note.leads.email,
         subject,
         text: body,
-        replyTo: FROM_EMAIL,
+        replyTo: sendingCfg.reply_to,
       });
       if (result.error) throw new Error(result.error.message);
       resendId = result.data?.id ?? null;
@@ -779,8 +781,9 @@ async function applyPlaybookApproval(
       | null;
     if (client?.email) {
       const ownerFirst = (client.owner_name ?? "").split(" ")[0] || "there";
+      const sendingCfg = await getClientSendingConfig(supabase, playbook.client_id);
       const result = await resend.emails.send({
-        from: FROM_EMAIL,
+        from: sendingCfg.from,
         to: client.email,
         subject: `${client.name}: your sales system is live`,
         text: `Hi ${ownerFirst},
@@ -791,7 +794,7 @@ You'll get a weekly digest. Reply to this email any time something looks off.
 
 Talk soon,
 Aylek Sales`,
-        replyTo: FROM_EMAIL,
+        replyTo: sendingCfg.reply_to,
       });
       if (result.error) throw new Error(result.error.message);
       emailSent = true;

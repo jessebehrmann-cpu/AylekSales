@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { resend, FROM_EMAIL } from "@/lib/resend";
+import { getClientSendingConfigOrBlock } from "@/lib/email-config";
 import { logEvent } from "@/lib/events";
 import type { SalesProcessStage, SequenceStep } from "@/lib/supabase/types";
 
@@ -139,14 +140,31 @@ export async function GET(req: NextRequest) {
       continue;
     }
 
+    // Resolve the per-client sending config. The cron BLOCKS sends to
+    // clients with an explicit config that isn't verified — we'd rather
+    // log a clear warning than silently leak from the global address.
+    // Clients with NO config still use the global FROM_EMAIL.
+    let sendingFrom = FROM_EMAIL;
+    let sendingReplyTo = FROM_EMAIL;
+    if (row.client_id) {
+      const cfg = await getClientSendingConfigOrBlock(supabase, row.client_id);
+      if (!cfg.ok) {
+        await markFailed(row.id, cfg.reason);
+        skipped++;
+        continue;
+      }
+      sendingFrom = cfg.config.from;
+      sendingReplyTo = cfg.config.reply_to;
+    }
+
     // Send via Resend
     try {
       const result = await resend.emails.send({
-        from: FROM_EMAIL,
+        from: sendingFrom,
         to: lead.email,
         subject: row.subject ?? "",
         text: row.body ?? "",
-        replyTo: FROM_EMAIL,
+        replyTo: sendingReplyTo,
       });
       if (result.error) throw new Error(result.error.message);
 

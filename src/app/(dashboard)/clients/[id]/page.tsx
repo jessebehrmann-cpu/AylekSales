@@ -99,6 +99,30 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
       <Card className="mt-6">
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <div>
+            <CardTitle className="text-base">Sending domain</CardTitle>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {client.email_config?.status === "verified"
+                ? `Outbound goes from ${client.email_config.from_email}`
+                : client.email_config?.status === "paused"
+                  ? "Outbound paused for this client"
+                  : client.email_config
+                    ? "Sending domain configured but not yet verified — finish DNS setup"
+                    : "No per-client sending domain — outbound uses the global Aylek address"}
+            </p>
+          </div>
+          {isAdmin && (
+            <Button asChild variant="outline" size="sm">
+              <Link href={`/clients/${client.id}/sending`}>
+                {client.email_config ? "Manage" : "Set up"}
+              </Link>
+            </Button>
+          )}
+        </CardHeader>
+      </Card>
+
+      <Card className="mt-6">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <div>
             <CardTitle className="text-base">Prospect-01</CardTitle>
             <p className="mt-1 text-xs text-muted-foreground">
               Sources contacts via Apollo against this client&apos;s approved playbook ICP. New leads land in the approval queue.

@@ -7,6 +7,7 @@ import {
   parseJsonResponse,
 } from "@/lib/anthropic";
 import { resend, FROM_EMAIL } from "@/lib/resend";
+import { getClientSendingConfig } from "@/lib/email-config";
 import { logEvent } from "@/lib/events";
 
 export type InboundEmail = {
@@ -155,14 +156,15 @@ Return ONLY valid JSON with these keys: is_genuine, quality, estimated_size, sug
     });
 
     if (q.is_genuine && q.next_action !== "disqualify") {
-      // Auto-send the AI's suggested reply
+      // Auto-send the AI's suggested reply, from the per-client domain.
+      const sendingCfg = await getClientSendingConfig(supabase, clientId);
       try {
         const sendResult = await resend.emails.send({
-          from: FROM_EMAIL,
+          from: sendingCfg.from,
           to: fromEmail,
           subject: payload.subject ? `Re: ${payload.subject.replace(/^Re:\s*/i, "")}` : "Thanks for getting in touch",
           text: q.suggested_response,
-          replyTo: FROM_EMAIL,
+          replyTo: sendingCfg.reply_to,
         });
         if (sendResult.error) throw new Error(sendResult.error.message);
 

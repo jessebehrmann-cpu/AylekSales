@@ -150,6 +150,30 @@ export type EventType =
   | "query_run"
   | "ai_action";
 
+export type ClientEmailConfigStatus = "unverified" | "verified" | "paused";
+
+export type ClientEmailDnsRecord = {
+  /** Resend's record kind: "TXT", "MX", "CNAME". */
+  record: string;
+  name: string;
+  type: string;
+  ttl?: string;
+  status?: string;
+  value: string;
+  priority?: number;
+};
+
+export type ClientEmailConfig = {
+  from_email: string;
+  reply_to: string;
+  resend_domain_id: string | null;
+  status: ClientEmailConfigStatus;
+  verified_at?: string | null;
+  dns_records?: ClientEmailDnsRecord[];
+  /** Free-text — surfaced on the admin page when verification last failed. */
+  last_error?: string | null;
+};
+
 export type Client = {
   id: string;
   name: string;
@@ -162,6 +186,10 @@ export type Client = {
   stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
   status: ClientStatus;
+  /** Per-client Resend sending config. NULL until configured. When
+   *  status !== "verified" the send loops fall back to the global env
+   *  vars (RESEND_FROM_EMAIL) and log a warning. */
+  email_config: ClientEmailConfig | null;
   notes: string | null;
   created_at: string;
 };
