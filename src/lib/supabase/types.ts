@@ -134,7 +134,7 @@ export type EmailStatus = "pending" | "sent" | "opened" | "replied" | "bounced" 
 export type MeetingStatus = "scheduled" | "completed" | "no_show" | "cancelled";
 export type MeetingFormat = "video" | "phone" | "in_person";
 export type QuoteStatus = "sent" | "accepted" | "rejected" | "expired";
-export type UserRole = "admin" | "sales_user";
+export type UserRole = "admin" | "sales_user" | "client_owner";
 
 export type EventType =
   | "email_sent"
@@ -208,6 +208,10 @@ export type AppUser = {
   full_name: string | null;
   email: string | null;
   role: UserRole;
+  /** Per-user RLS scopes. Empty for admins (who see everything).
+   *  Populated for client_owner / sales_user users to whitelist the
+   *  client_ids they can read/write. */
+  client_ids: string[];
   created_at: string;
 };
 
