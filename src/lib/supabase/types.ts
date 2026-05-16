@@ -343,6 +343,49 @@ export type ProposalReviewPayload = {
 };
 export type ApprovalStatus = "pending" | "approved" | "rejected";
 
+/** Per-provider params produced by the Claude-powered ICP translator —
+ *  the exact shapes each downstream API expects. Cached on the playbook
+ *  row so we only re-run Claude when the playbook version changes. */
+export type TranslatedApolloParams = {
+  /** `person_titles[]` — expanded variants (e.g. "Head of Operations" →
+   *  ["Head of Operations", "VP Operations", "Director of Operations",
+   *  "COO", "Operations Manager"]). */
+  person_titles?: string[];
+  /** Apollo enum: owner | founder | c_suite | partner | vp | head |
+   *  director | manager | senior | entry | intern. */
+  person_seniorities?: string[];
+  /** Cities, US states, countries — Apollo `person_locations[]`. */
+  person_locations?: string[];
+  /** Comma-separated min,max strings — Apollo expects exactly this format
+   *  e.g. ["20,200"]. */
+  organization_num_employees_ranges?: string[];
+  /** Free-text industry keywords. Apollo's `q_organization_industry_keywords`
+   *  is undocumented on People Search but observed to filter in practice. */
+  q_organization_industry_keywords?: string[];
+  /** Free-text keyword filter — Apollo `q_keywords`. */
+  q_keywords?: string;
+  /** Set false when we've already expanded titles; default true otherwise. */
+  include_similar_titles?: boolean;
+};
+
+export type TranslatedHunterParams = {
+  /** Case-insensitive substring filter applied after Hunter returns a
+   *  candidate — used to reject contacts whose title doesn't match. */
+  title_keywords?: string[];
+};
+
+export type TranslatedParams = {
+  /** Playbook version this translation was generated for. */
+  version: number;
+  apollo: TranslatedApolloParams;
+  hunter: TranslatedHunterParams;
+  /** Claude's notes on what it inferred / expanded. */
+  notes?: string;
+  /** Set when Claude was unavailable and the deterministic fallback was used. */
+  warning?: string | null;
+  created_at: string;
+};
+
 export type ICP = {
   industries?: string[];
   company_size?: string;
@@ -350,10 +393,9 @@ export type ICP = {
   geography?: string[];
   qualification_signal?: string;
   disqualifiers?: string[];
-  /** Optional explicit list of company domains to source against. Required
-   *  when Prospect-01 is running with the Hunter.io provider (Hunter is
-   *  domain-driven, not industry-driven). Ignored by Apollo. */
-  target_domains?: string[];
+  /** Set by lib/icp-translator.ts when Prospect-01 first runs. Regenerated
+   *  whenever playbook.version changes. */
+  translated_params?: TranslatedParams;
 };
 
 export type PlaybookSequenceStep = {

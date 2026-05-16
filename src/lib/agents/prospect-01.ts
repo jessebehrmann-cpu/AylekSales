@@ -1,58 +1,70 @@
 /**
  * Prospect-01 — sources fresh contacts for a client based on the approved
- * playbook ICP, dedupes against existing leads, writes new leads with
- * source='ai_enriched' + approval_status='pending_approval', and creates a
- * lead_list approval row for the HOS to review.
+ * playbook ICP. End-to-end flow:
  *
- * Two providers are supported, abstracted behind `lib/agents/providers.ts`:
- *   - Apollo.io (industry/title-driven; two-step search → enrich for emails)
- *   - Hunter.io (domain-driven; needs `icp.target_domains` in the playbook)
+ *   1. Load the client's approved playbook.
+ *   2. Translate the raw English ICP into Apollo + Hunter API params via
+ *      `lib/icp-translator.ts`. Cached on the playbook row per version —
+ *      normal runs make ZERO Claude calls.
+ *   3. Apollo People Search with the translated params.
+ *   4. Apollo bulk-enrichment for every search hit → contacts with email.
+ *   5. For search hits Apollo couldn't enrich: call Hunter Email Finder
+ *      using the contact's first/last name + organisation domain.
+ *   6. Drop contacts still missing an email (Hunter returned 404).
+ *   7. Dedup against existing leads (case-insensitive email).
+ *   8. Insert remaining leads as `source='ai_enriched'`,
+ *      `approval_status='pending_approval'`.
+ *   9. Create a `lead_list` approval with the full funnel in payload so
+ *      HOS can audit each stage.
  *
- * Provider resolution rules (from `resolveProviders()`):
- *   APOLLO_API_KEY ∧ HUNTER_API_KEY → Apollo primary, Hunter fallback
- *   APOLLO_API_KEY only             → Apollo only
- *   HUNTER_API_KEY only             → Hunter only
- *   neither                          → config_error
- *
- * Fallback is automatic when the primary returns 403 / 429 / 5xx. Every
- * approval row carries `payload.provider` + `payload.funnel` so HOS can
- * see exactly which provider sourced the batch and where contacts were
- * lost.
- *
- * Re-run safe: dedup against existing leads, so calling twice in a row
- * just inserts whatever's new since last time.
+ * Re-run safe: dedup ensures repeated runs only insert what's new.
  */
 
 import { createServiceClient } from "@/lib/supabase/server";
 import { logEvent } from "@/lib/events";
-import type { ApolloSearchFilter } from "@/lib/apollo";
 import {
-  resolveProviders,
-  runProvider,
-  shouldFallback,
-  type NormalizedContact,
-  type ProviderName,
-  type ProviderRunResult,
-} from "@/lib/agents/providers";
-import type { ICP, Playbook } from "@/lib/supabase/types";
+  ApolloApiError,
+  ApolloConfigError,
+  apolloKeyFingerprint,
+  enrichPeople,
+  searchPeople,
+  type ApolloPersonFull,
+  type ApolloPersonPartial,
+} from "@/lib/apollo";
+import {
+  HunterApiError,
+  HunterConfigError,
+  findEmail as hunterFindEmail,
+  hunterKeyFingerprint,
+} from "@/lib/hunter";
+import { getOrCreateTranslatedParams } from "@/lib/icp-translator";
+import type { ICP, Playbook, TranslatedApolloParams } from "@/lib/supabase/types";
+
+export type ProspectFunnel = {
+  /** People returned by Apollo search (pre-enrichment). */
+  searched: number;
+  /** Apollo search hits we sent to bulk_match for email enrichment. */
+  enrichment_attempted: number;
+  /** Apollo enrichment hits that came back with an email. */
+  enriched_via_apollo: number;
+  /** Hunter email-finder calls made for Apollo enrichment misses. */
+  hunter_lookups_attempted: number;
+  /** Hunter calls that returned an email (not 404). */
+  enriched_via_hunter: number;
+  /** People dropped because no provider could find their email. */
+  missing_email: number;
+  /** Email duplicates against existing leads, filtered. */
+  duplicates: number;
+  /** New rows inserted into the leads table. */
+  new: number;
+};
 
 export type ProspectRunResult = {
   ok: true;
   client_id: string;
-  /** Which provider produced the contacts in this batch. */
-  provider_used: ProviderName;
-  /** Provider-specific funnel counts (searched_total / enrichment_attempted
-   *  / enriched_with_email for Apollo; searched_domains / domains_with_emails
-   *  / total_emails_returned for Hunter). */
-  funnel: Record<string, number>;
-  /** Number of contacts the provider returned with a usable email
-   *  (pre-dedup). Equivalent to `funnel.enriched_with_email` for Apollo
-   *  and `funnel.total_emails_returned` for Hunter (post-filter). */
-  found: number;
-  /** New leads inserted into the DB after dedup. */
-  new: number;
-  /** Contacts dropped because the email was already in our leads table. */
-  duplicates: number;
+  funnel: ProspectFunnel;
+  translated_params: TranslatedApolloParams;
+  translation_cache_hit: boolean;
   approval_id: string | null;
   lead_ids: string[];
 };
@@ -60,8 +72,6 @@ export type ProspectRunResult = {
 export type ProspectRunFailure = {
   ok: false;
   error: string;
-  /** True when the failure is a missing/invalid API key, so callers can
-   *  surface a clearer "configure the provider" message vs a runtime error. */
   config_error?: boolean;
 };
 
@@ -71,7 +81,11 @@ export async function runProspect01(
 ): Promise<ProspectRunResult | ProspectRunFailure> {
   const supabase = createServiceClient();
 
-  // 1. Find the client's approved playbook + read ICP
+  console.log(
+    `[prospect-01] start client=${clientId} apollo=${apolloKeyFingerprint()} hunter=${hunterKeyFingerprint()}`,
+  );
+
+  // 1. Load approved playbook
   const { data: pb } = await supabase
     .from("playbooks")
     .select("*")
@@ -87,63 +101,153 @@ export async function runProspect01(
   const playbook = pb as Playbook;
   const icp = (playbook.icp ?? {}) as ICP;
 
-  // 2. Resolve providers from env
-  const cfg = resolveProviders();
-  if (!cfg.primary) {
-    return {
-      ok: false,
-      error:
-        "No prospecting provider configured. Set APOLLO_API_KEY and/or HUNTER_API_KEY to enable Prospect-01.",
-      config_error: true,
-    };
-  }
-
-  // 3. Build the Apollo filter once (cheap; Hunter ignores it but
-  //    consumes icp.target_titles + icp.target_domains directly).
-  const apolloFilter = buildApolloFilter(icp, opts.pageSize ?? 50);
-  const hunterRequiresDomains = cfg.primary === "hunter" || cfg.fallback === "hunter";
-  if (
-    cfg.primary === "apollo" &&
-    !apolloFilter.industries?.length &&
-    !apolloFilter.titles?.length &&
-    !hunterRequiresDomains
-  ) {
+  if (!icp.target_titles?.length && !icp.industries?.length) {
     return {
       ok: false,
       error: "ICP needs at least one of: industries, target_titles. Tighten the playbook and retry.",
     };
   }
 
-  // 4. Run the primary; on a fallback-eligible failure, retry with the
-  //    secondary. Other failures surface as-is.
-  let providerResult: ProviderRunResult = await runProvider(
-    cfg.primary,
-    apolloFilter,
+  // 2. Translate ICP (cached per playbook version)
+  const { params: translated, cacheHit } = await getOrCreateTranslatedParams({
+    supabase,
+    playbookId: playbook.id,
     icp,
+    playbookVersion: playbook.version,
+  });
+  console.log(
+    `[prospect-01] translation ${cacheHit ? "cache hit" : "cache miss — Claude called"} (version ${translated.version})`,
   );
-  let fellBackFrom: ProviderName | null = null;
-  if (!providerResult.ok && cfg.fallback && shouldFallback(providerResult.error)) {
-    console.log(
-      `[prospect-01] ${cfg.primary} failed (${providerResult.error.slice(0, 120)}) — falling back to ${cfg.fallback}`,
-    );
-    fellBackFrom = cfg.primary;
-    providerResult = await runProvider(cfg.fallback, apolloFilter, icp);
+
+  // 3. Apollo People Search
+  let search: Awaited<ReturnType<typeof searchPeople>>;
+  try {
+    search = await searchPeople({
+      ...translated.apollo,
+      per_page: opts.pageSize ?? 50,
+      page: 1,
+    });
+  } catch (err) {
+    if (err instanceof ApolloConfigError) {
+      return { ok: false, error: err.message, config_error: true };
+    }
+    if (err instanceof ApolloApiError) {
+      return {
+        ok: false,
+        error: `Apollo API error (${err.status}): ${err.message}${err.body ? ` — ${err.body.slice(0, 200)}` : ""}`,
+      };
+    }
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 
-  if (!providerResult.ok) {
+  // 4. Apollo bulk enrichment
+  const ids = search.people.map((p) => p.id).filter(Boolean);
+  let enrichment: Awaited<ReturnType<typeof enrichPeople>>;
+  try {
+    enrichment = await enrichPeople(ids);
+  } catch (err) {
     return {
       ok: false,
-      error: providerResult.error,
-      config_error: providerResult.config_error,
+      error:
+        err instanceof ApolloApiError
+          ? `Apollo enrichment failed (${err.status}): ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : String(err),
     };
   }
 
-  const providerUsed = providerResult.provider;
-  const funnel = providerResult.funnel;
-  const contacts = providerResult.contacts;
+  // Stitch enriched contacts back onto their partial counterparts —
+  // keeps the org domain handy if Apollo only returned it in the search
+  // step (or only in the enrichment step). Build a map by id.
+  const enrichedById = new Map<string, ApolloPersonFull>();
+  for (const e of enrichment.enriched) enrichedById.set(e.id, e);
 
-  // 5. Dedup against existing leads (by email, case-insensitive)
-  const candidateEmails = contacts
+  const stitched: Array<ApolloPersonFull & { source: "apollo" | "hunter" }> = [];
+  const hunterTargets: Array<{
+    partial: ApolloPersonPartial;
+    domain: string;
+  }> = [];
+  let hunterLookupsAttempted = 0;
+  let enrichedViaHunter = 0;
+  let missingEmail = 0;
+
+  for (const partial of search.people) {
+    const enriched = enrichedById.get(partial.id);
+    const mergedOrg = {
+      ...partial.organization,
+      ...(enriched?.organization ?? {}),
+    };
+    const merged: ApolloPersonFull = {
+      ...partial,
+      ...(enriched ?? {}),
+      organization: mergedOrg,
+      email: enriched?.email ?? null,
+      email_status: enriched?.email_status ?? null,
+    };
+
+    if (merged.email) {
+      stitched.push({ ...merged, source: "apollo" });
+      continue;
+    }
+
+    // No Apollo email — try Hunter if we have enough to call it.
+    const domain = merged.organization.domain;
+    const first = merged.first_name;
+    const last = merged.last_name;
+    if (
+      process.env.HUNTER_API_KEY &&
+      domain &&
+      first &&
+      last
+    ) {
+      hunterTargets.push({ partial: merged, domain });
+    } else {
+      missingEmail++;
+    }
+  }
+
+  // 5. Hunter email-finder for misses
+  for (const t of hunterTargets) {
+    if (!t.partial.first_name || !t.partial.last_name) {
+      missingEmail++;
+      continue;
+    }
+    hunterLookupsAttempted++;
+    try {
+      const found = await hunterFindEmail({
+        domain: t.domain,
+        first_name: t.partial.first_name,
+        last_name: t.partial.last_name,
+      });
+      if (found) {
+        enrichedViaHunter++;
+        stitched.push({
+          ...(t.partial as ApolloPersonFull),
+          email: found.email,
+          email_status: found.verification_status,
+          source: "hunter",
+        });
+      } else {
+        missingEmail++;
+      }
+    } catch (err) {
+      if (err instanceof HunterConfigError) {
+        // No key — shouldn't happen since we guarded above. Count as miss.
+        missingEmail++;
+      } else if (err instanceof HunterApiError) {
+        // Hard error from Hunter — log and treat as miss; don't fail the whole run.
+        console.warn(`[prospect-01] hunter error for ${t.domain}/${t.partial.first_name} ${t.partial.last_name}:`, err.message);
+        missingEmail++;
+      } else {
+        console.warn(`[prospect-01] hunter call threw for ${t.domain}:`, err);
+        missingEmail++;
+      }
+    }
+  }
+
+  // 7. Dedup against existing leads (case-insensitive email)
+  const candidateEmails = stitched
     .map((c) => c.email?.trim().toLowerCase())
     .filter((e): e is string => !!e);
 
@@ -158,9 +262,8 @@ export async function runProspect01(
     }
   }
 
-  // 6. Build inserts — only contacts with an email (so the send loop can use them)
   const seenInBatch = new Set<string>();
-  const toInsert = contacts
+  const toInsert = stitched
     .filter((c) => {
       if (!c.email) return false;
       const e = c.email.toLowerCase();
@@ -168,7 +271,19 @@ export async function runProspect01(
       seenInBatch.add(e);
       return true;
     })
-    .map((c) => leadInsertFromContact(clientId, c));
+    .map((c) => ({
+      client_id: clientId,
+      company_name: c.organization.name ?? "Unknown company",
+      contact_name: [c.first_name, c.last_name].filter(Boolean).join(" ") || null,
+      title: c.title,
+      email: c.email,
+      industry: c.organization.industry,
+      website: c.organization.website ?? c.organization.domain,
+      employees_estimate: parseEmployees(c.organization.size),
+      source: "ai_enriched" as const,
+      stage: "new" as const,
+      approval_status: "pending_approval" as const,
+    }));
 
   let insertedLeadIds: string[] = [];
   if (toInsert.length > 0) {
@@ -182,9 +297,19 @@ export async function runProspect01(
     insertedLeadIds = (inserted ?? []).map((r: { id: string }) => r.id);
   }
 
-  const duplicates = contacts.length - insertedLeadIds.length;
+  const duplicates = stitched.filter((c) => c.email).length - insertedLeadIds.length;
+  const funnel: ProspectFunnel = {
+    searched: search.people.length,
+    enrichment_attempted: enrichment.attempted,
+    enriched_via_apollo: enrichment.with_email,
+    hunter_lookups_attempted: hunterLookupsAttempted,
+    enriched_via_hunter: enrichedViaHunter,
+    missing_email: missingEmail,
+    duplicates,
+    new: insertedLeadIds.length,
+  };
 
-  // 7. Create lead_list approval (only if we sourced new leads)
+  // 9. Create lead_list approval (only if we sourced new leads)
   let approvalId: string | null = null;
   if (insertedLeadIds.length > 0) {
     const { data: existingCampaign } = await supabase
@@ -197,13 +322,7 @@ export async function runProspect01(
       .maybeSingle();
     const campaign = existingCampaign as { id: string; name: string } | null;
 
-    const summary = buildApprovalSummary({
-      providerUsed,
-      fellBackFrom,
-      funnel,
-      duplicates,
-      campaign,
-    });
+    const summary = buildApprovalSummary(funnel, campaign);
 
     const { data: appr, error: apprErr } = await supabase
       .from("approvals")
@@ -211,16 +330,15 @@ export async function runProspect01(
         client_id: clientId,
         type: "lead_list",
         status: "pending",
-        title: `Prospect-01 sourced ${insertedLeadIds.length} new leads (via ${providerUsed})`,
+        title: `Prospect-01 sourced ${funnel.new} new leads`,
         summary,
         payload: {
           lead_ids: insertedLeadIds,
           source: "prospect-01",
           campaign_id: campaign?.id ?? null,
-          provider: providerUsed,
-          fell_back_from: fellBackFrom,
           funnel,
-          apollo: { filter: apolloFilter },
+          translated_params: translated.apollo,
+          translation_cache_hit: cacheHit,
         },
         related_campaign_id: campaign?.id ?? null,
         created_by: opts.triggeredBy ?? null,
@@ -240,12 +358,9 @@ export async function runProspect01(
     user_id: opts.triggeredBy ?? null,
     payload: {
       kind: "prospect_run",
-      provider_used: providerUsed,
-      fell_back_from: fellBackFrom,
       funnel,
-      found: contacts.length,
-      new: insertedLeadIds.length,
-      duplicates,
+      translated_params: translated.apollo,
+      translation_cache_hit: cacheHit,
       approval_id: approvalId,
     },
   });
@@ -253,89 +368,26 @@ export async function runProspect01(
   return {
     ok: true,
     client_id: clientId,
-    provider_used: providerUsed,
     funnel,
-    found: contacts.length,
-    new: insertedLeadIds.length,
-    duplicates,
+    translated_params: translated.apollo,
+    translation_cache_hit: cacheHit,
     approval_id: approvalId,
     lead_ids: insertedLeadIds,
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────
-
-function leadInsertFromContact(clientId: string, c: NormalizedContact) {
-  return {
-    client_id: clientId,
-    company_name: c.company.name ?? "Unknown company",
-    contact_name: [c.first_name, c.last_name].filter(Boolean).join(" ") || null,
-    title: c.title,
-    email: c.email,
-    industry: c.company.industry,
-    website: c.company.website ?? c.company.domain,
-    employees_estimate: parseEmployees(c.company.size),
-    source: "ai_enriched" as const,
-    stage: "new" as const,
-    approval_status: "pending_approval" as const,
-  };
-}
-
-function buildApprovalSummary(args: {
-  providerUsed: ProviderName;
-  fellBackFrom: ProviderName | null;
-  funnel: Record<string, number>;
-  duplicates: number;
-  campaign: { id: string; name: string } | null;
-}): string {
-  const { providerUsed, fellBackFrom, funnel, duplicates, campaign } = args;
-  const parts: string[] = [];
-  if (fellBackFrom) {
-    parts.push(
-      `${fellBackFrom} returned an error → fell back to ${providerUsed}.`,
-    );
-  }
-  if (providerUsed === "apollo") {
-    parts.push(
-      `Apollo search matched ${funnel.searched_total ?? 0} people; enrichment returned ${funnel.enriched_with_email ?? 0} with email (${(funnel.enrichment_attempted ?? 0) - (funnel.enriched_with_email ?? 0)} had no usable email).`,
-    );
-  } else {
-    parts.push(
-      `Hunter searched ${funnel.searched_domains ?? 0} domains; ${funnel.domains_with_emails ?? 0} returned at least one email (${funnel.total_emails_returned ?? 0} emails total before title filter).`,
-    );
-  }
-  parts.push(`${duplicates} duplicate(s) filtered against existing leads.`);
-  parts.push(
+function buildApprovalSummary(
+  funnel: ProspectFunnel,
+  campaign: { id: string; name: string } | null,
+): string {
+  return [
+    `Apollo search matched ${funnel.searched} people; enrichment returned ${funnel.enriched_via_apollo} with email.`,
+    `Hunter found ${funnel.enriched_via_hunter} more emails on ${funnel.hunter_lookups_attempted} lookups.`,
+    `${funnel.missing_email} dropped (no email findable). ${funnel.duplicates} duplicates filtered.`,
     campaign
       ? `Will enrol into ${campaign.name} on approve.`
       : "No campaign attached — pick one at approval time.",
-  );
-  return parts.join(" ");
-}
-
-function buildApolloFilter(icp: ICP, pageSize: number): ApolloSearchFilter {
-  return {
-    industries: icp.industries?.length ? icp.industries : undefined,
-    titles: icp.target_titles?.length ? icp.target_titles : undefined,
-    locations: icp.geography?.length ? icp.geography : undefined,
-    companySize: parseCompanySize(icp.company_size),
-    pageSize,
-  };
-}
-
-/** Parse strings like "20–500 employees" / "50-1000" / "100+" into a band. */
-function parseCompanySize(input: string | undefined): { min?: number; max?: number } | undefined {
-  if (!input) return undefined;
-  const cleaned = input.replace(/employees?/i, "").trim();
-  const m = cleaned.match(/(\d+)\s*[\-–to]+\s*(\d+)/i);
-  if (m) return { min: parseInt(m[1], 10), max: parseInt(m[2], 10) };
-  const plus = cleaned.match(/(\d+)\+/);
-  if (plus) return { min: parseInt(plus[1], 10) };
-  const just = cleaned.match(/^(\d+)$/);
-  if (just) return { min: parseInt(just[1], 10), max: parseInt(just[1], 10) };
-  return undefined;
+  ].join(" ");
 }
 
 function parseEmployees(input: string | null): number | null {
