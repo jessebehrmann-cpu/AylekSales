@@ -1,8 +1,63 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { Message, MessageCreateParamsNonStreaming } from "@anthropic-ai/sdk/resources/messages";
+import { anthropicCostCents, recordUsage } from "@/lib/usage";
 
-export const anthropic = new Anthropic({
+const rawClient = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
+
+/**
+ * Wrap the Anthropic SDK so every `messages.create` call records a
+ * `usage_events` row attributed to the current client (when known).
+ * Callers can pass an Aylek-specific `aylekClientId` option that we
+ * strip before forwarding — never leaks to the API.
+ *
+ * The wrapper only supports the NON-streaming path (our codebase
+ * always passes max_tokens + system as a single completion). Add a
+ * second overload if/when we start streaming.
+ */
+type CreateArgs = MessageCreateParamsNonStreaming & {
+  aylekClientId?: string | null;
+};
+
+export const anthropic = {
+  messages: {
+    create: async (args: CreateArgs): Promise<Message> => {
+      const { aylekClientId, ...forward } = args;
+      const start = Date.now();
+      try {
+        const res = (await rawClient.messages.create(forward)) as Message;
+        const usage = res.usage ?? { input_tokens: 0, output_tokens: 0 };
+        recordUsage({
+          clientId: aylekClientId ?? null,
+          kind: "anthropic.messages",
+          units: (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+          costCents: anthropicCostCents(usage),
+          payload: {
+            model: forward.model,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            duration_ms: Date.now() - start,
+          },
+        });
+        return res;
+      } catch (err) {
+        recordUsage({
+          clientId: aylekClientId ?? null,
+          kind: "anthropic.messages",
+          units: 0,
+          costCents: 0,
+          payload: {
+            model: forward.model,
+            error: err instanceof Error ? err.message : String(err),
+            duration_ms: Date.now() - start,
+          },
+        });
+        throw err;
+      }
+    },
+  },
+};
 
 export const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
 

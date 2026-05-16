@@ -126,6 +126,7 @@ export async function runProspect01(
       ...translated.apollo,
       per_page: opts.pageSize ?? 50,
       page: 1,
+      clientId,
     });
   } catch (err) {
     if (err instanceof ApolloConfigError) {
@@ -144,7 +145,7 @@ export async function runProspect01(
   const ids = search.people.map((p) => p.id).filter(Boolean);
   let enrichment: Awaited<ReturnType<typeof enrichPeople>>;
   try {
-    enrichment = await enrichPeople(ids);
+    enrichment = await enrichPeople(ids, { clientId });
   } catch (err) {
     return {
       ok: false,
@@ -219,6 +220,7 @@ export async function runProspect01(
         domain: t.domain,
         first_name: t.partial.first_name,
         last_name: t.partial.last_name,
+        clientId,
       });
       if (found) {
         enrichedViaHunter++;

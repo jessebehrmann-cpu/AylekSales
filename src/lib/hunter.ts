@@ -23,6 +23,9 @@
  * Rate limits per docs: 15 requests/sec, 500 requests/min.
  */
 
+import { hunterFinderCostCents, recordUsage } from "@/lib/usage";
+import { rateLimit } from "@/lib/rate-limit";
+
 const HUNTER_BASE = process.env.HUNTER_BASE_URL ?? "https://api.hunter.io";
 
 export class HunterConfigError extends Error {}
@@ -62,6 +65,12 @@ async function hunterFetch(
   query: Record<string, string | undefined>,
   attempt = 0,
 ): Promise<Response> {
+  // Hunter caps at 15 req/sec and 500/min — we sit comfortably below
+  // both with 30/sec by default.
+  await rateLimit("hunter", {
+    tokensPerInterval: Number(process.env.HUNTER_RPS ?? "30"),
+    intervalMs: 1_000,
+  });
   const apiKey = getApiKey();
   const params = new URLSearchParams();
   params.set("api_key", apiKey);
@@ -101,6 +110,7 @@ export async function findEmail(args: {
   domain: string;
   first_name: string;
   last_name: string;
+  clientId?: string | null;
 }): Promise<HunterEmailResult | null> {
   const res = await hunterFetch("/v2/email-finder", {
     domain: args.domain,
@@ -108,7 +118,16 @@ export async function findEmail(args: {
     last_name: args.last_name,
   });
 
-  if (res.status === 404) return null;
+  if (res.status === 404) {
+    recordUsage({
+      clientId: args.clientId ?? null,
+      kind: "hunter.email_finder",
+      units: 0,
+      costCents: hunterFinderCostCents(false),
+      payload: { domain: args.domain, found: false },
+    });
+    return null;
+  }
 
   const text = await res.text();
   if (!res.ok) {
@@ -120,8 +139,27 @@ export async function findEmail(args: {
   }
 
   const json = safeJson(text) as { data?: Record<string, unknown> };
-  if (!json.data || !json.data.email) return null;
-  return normaliseEmailResponse(json.data);
+  if (!json.data || !json.data.email) {
+    recordUsage({
+      clientId: args.clientId ?? null,
+      kind: "hunter.email_finder",
+      units: 0,
+      costCents: hunterFinderCostCents(false),
+      payload: { domain: args.domain, found: false },
+    });
+    return null;
+  }
+  const result = normaliseEmailResponse(json.data);
+  if (result) {
+    recordUsage({
+      clientId: args.clientId ?? null,
+      kind: "hunter.email_finder",
+      units: 1,
+      costCents: hunterFinderCostCents(true),
+      payload: { domain: args.domain, found: true, confidence: result.confidence },
+    });
+  }
+  return result;
 }
 
 function normaliseEmailResponse(raw: Record<string, unknown>): HunterEmailResult | null {

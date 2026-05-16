@@ -28,6 +28,8 @@
 import type {
   TranslatedApolloParams,
 } from "@/lib/supabase/types";
+import { apolloEnrichmentCostCents, recordUsage } from "@/lib/usage";
+import { rateLimit } from "@/lib/rate-limit";
 
 const APOLLO_BASE = process.env.APOLLO_BASE_URL ?? "https://api.apollo.io";
 const SEARCH_PATH = "/api/v1/mixed_people/search";
@@ -83,6 +85,12 @@ export function apolloKeyFingerprint(): string {
 }
 
 async function apolloFetch(path: string, init: RequestInit, attempt = 0): Promise<Response> {
+  // Apollo's burst limit varies by plan; 60/min is a safe default across
+  // Basic. Override via env if you have headroom.
+  await rateLimit("apollo", {
+    tokensPerInterval: Number(process.env.APOLLO_RPM ?? "60"),
+    intervalMs: 60_000,
+  });
   const apiKey = getApiKey();
   const url = `${APOLLO_BASE}${path}`;
   const res = await fetch(url, {
@@ -125,7 +133,12 @@ export type SearchPeopleResult = {
  * (person_titles, person_seniorities, etc.) plus pagination.
  */
 export async function searchPeople(
-  params: TranslatedApolloParams & { page?: number; per_page?: number },
+  params: TranslatedApolloParams & {
+    page?: number;
+    per_page?: number;
+    /** Set so usage events are attributed to a client. */
+    clientId?: string | null;
+  },
 ): Promise<SearchPeopleResult> {
   const body = buildSearchBody(params);
   const res = await apolloFetch(SEARCH_PATH, {
@@ -141,7 +154,15 @@ export async function searchPeople(
     );
   }
   const json = text ? safeJson(text) : {};
-  return normaliseSearchResponse(json);
+  const result = normaliseSearchResponse(json);
+  recordUsage({
+    clientId: params.clientId ?? null,
+    kind: "apollo.search",
+    units: result.people.length,
+    costCents: 0, // search is free on Apollo
+    payload: { per_page: body.per_page, page: body.page },
+  });
+  return result;
 }
 
 function buildSearchBody(
@@ -191,7 +212,10 @@ export type EnrichPeopleResult = {
   with_email: number;
 };
 
-export async function enrichPeople(ids: string[]): Promise<EnrichPeopleResult> {
+export async function enrichPeople(
+  ids: string[],
+  opts: { clientId?: string | null } = {},
+): Promise<EnrichPeopleResult> {
   if (ids.length === 0) return { enriched: [], attempted: 0, with_email: 0 };
   const out: ApolloPersonFull[] = [];
   for (const chunk of chunkArray(ids, ENRICH_CHUNK_SIZE)) {
@@ -214,6 +238,13 @@ export async function enrichPeople(ids: string[]): Promise<EnrichPeopleResult> {
     out.push(...normaliseEnrichResponse(json));
   }
   const with_email = out.filter((p) => p.email != null).length;
+  recordUsage({
+    clientId: opts.clientId ?? null,
+    kind: "apollo.bulk_match",
+    units: with_email,
+    costCents: apolloEnrichmentCostCents(with_email),
+    payload: { attempted: ids.length, with_email },
+  });
   return { enriched: out, attempted: ids.length, with_email };
 }
 

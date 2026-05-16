@@ -121,6 +121,20 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
         </CardHeader>
       </Card>
 
+      <Card className="mt-6">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle className="text-base">Usage + spend</CardTitle>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Month-to-date upstream API spend (Apollo, Hunter, Claude, Resend).
+            </p>
+          </div>
+          <Button asChild variant="outline" size="sm">
+            <Link href={`/clients/${client.id}/usage`}>View</Link>
+          </Button>
+        </CardHeader>
+      </Card>
+
       {isAdmin && (
         <Card className="mt-6">
           <CardHeader>

@@ -110,6 +110,12 @@ export type Database = {
         Update: Partial<SuppressedEmail>;
         Relationships: [];
       };
+      usage_events: {
+        Row: UsageEvent;
+        Insert: Partial<Omit<UsageEvent, "kind">> & { kind: string };
+        Update: Partial<UsageEvent>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;
@@ -742,4 +748,16 @@ export type SuppressedEmail = {
   notes: string | null;
   unsubscribe_token: string;
   suppressed_at: string;
+};
+
+// ── Usage events ──────────────────────────────────────────────────────────
+
+export type UsageEvent = {
+  id: string;
+  client_id: string | null;
+  kind: string;
+  units: number;
+  cost_cents: number;
+  payload: Json;
+  occurred_at: string;
 };
