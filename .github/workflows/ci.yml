@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Vitest smoke tests
+        run: npm test
+
+      - name: Production build
+        # The build needs SOME env vars to satisfy Next's static-export
+        # validation. Provide harmless placeholders — runtime values
+        # come from Vercel.
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-key
+          SUPABASE_SERVICE_ROLE_KEY: ci-placeholder-service-role
+          RESEND_API_KEY: re_ci_placeholder
+          ANTHROPIC_API_KEY: sk-ant-ci-placeholder
+          STRIPE_SECRET_KEY: sk_test_ci_placeholder
+          NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: pk_test_ci_placeholder
+          APOLLO_API_KEY: ci-placeholder
+          HUNTER_API_KEY: ci-placeholder
+        run: npm run build
