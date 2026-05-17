@@ -27,6 +27,7 @@ import {
 import type {
   Database,
   ICP,
+  PlaybookSegment,
   TranslatedApolloParams,
   TranslatedHunterParams,
   TranslatedParams,
@@ -177,6 +178,43 @@ export async function getOrCreateTranslatedParams(args: {
   await args.supabase
     .from("playbooks")
     .update({ icp: nextIcp })
+    .eq("id", args.playbookId);
+
+  return { params, cacheHit: false };
+}
+
+/**
+ * Item 7 — per-segment variant. Translates the segment's ICP and caches
+ * the result inside playbook.segments[i].icp.translated_params (so the
+ * playbook row gets one round trip even when N segments are translated).
+ * Versioned on playbook.version, same as the playbook-level cache.
+ */
+export async function getOrCreateSegmentTranslatedParams(args: {
+  supabase: Supa;
+  playbookId: string;
+  segments: PlaybookSegment[];
+  segmentId: string;
+  playbookVersion: number;
+}): Promise<{ params: TranslatedParams; cacheHit: boolean }> {
+  const idx = args.segments.findIndex((s) => s.id === args.segmentId);
+  if (idx < 0) throw new Error(`Segment ${args.segmentId} not found on playbook ${args.playbookId}`);
+  const segment = args.segments[idx];
+  const cached = segment.icp.translated_params;
+  if (cached && cached.version === args.playbookVersion) {
+    return { params: cached, cacheHit: true };
+  }
+
+  const params = await translateIcp({
+    icp: segment.icp,
+    playbookVersion: args.playbookVersion,
+  });
+
+  const nextSegments = args.segments.map((s, i) =>
+    i === idx ? { ...s, icp: { ...s.icp, translated_params: params } } : s,
+  );
+  await args.supabase
+    .from("playbooks")
+    .update({ segments: nextSegments })
     .eq("id", args.playbookId);
 
   return { params, cacheHit: false };

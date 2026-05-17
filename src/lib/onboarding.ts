@@ -28,6 +28,7 @@ import type {
   OnboardingAnswers,
   OnboardingFeedbackRound,
   OnboardingSectionId,
+  PlaybookSegment,
 } from "@/lib/supabase/types";
 import { DEFAULT_SALES_PROCESS } from "@/lib/playbook-defaults";
 
@@ -360,6 +361,14 @@ sales_process
 - Use the canonical 9 stages with the canonical agent handles (prospect-01, outreach-01, sales-01, handover-01, human). Descriptions should be one short polished sentence each, written for the client's industry context.
 - conditions: lift any explicit rules the contact stated and put them on the relevant stage. E.g. "only book a meeting if the prospect explicitly asks" goes on book_meeting. null when no rule.
 
+segments (Item 7 — minimum 8)
+- Produce AT LEAST 8 distinct micro-segments inside the broader ICP. Each segment is a tight slice of the customer base that warrants its own pitch (e.g. for a hospitality SaaS: "Independent cafes in inner-Sydney", "Hotel F&B teams in 4-5 star properties", "Independent winery cellar doors", "Multi-location pub groups", "Catering companies", "Dark kitchens / cloud kitchens", "Independent bakeries", "Wine bars and small-plate restaurants" — eight distinct angles, not eight rewordings of one ICP).
+- Each segment has its OWN ICP (industries / company_size / target_titles / geography / qualification_signal / disqualifiers) — tighter and more specific than the catch-all playbook ICP.
+- value_angle is the DISTINCT 1-2 sentence pitch for THIS segment — not the generic value prop. What lands for this slice that doesn't land for the others?
+- estimated_pool_size: realistic 3-5 digit number based on your knowledge of how big this segment actually is in the contact's geography.
+- status starts as "pending_approval". performance_score is null. runs_completed is 0. leads_remaining = estimated_pool_size.
+- Segment ids are stable strings: "seg_001" … "seg_008" (or more). Never reuse an id across segments.
+
 sequences (3 steps)
 - This is the highest-stakes section. Write it like a senior B2B copywriter who specialises in the contact's industry — someone who's written 10,000 of these and knows what lands.
 - Subject lines: short, specific, NEVER generic ("Quick question about {company_name}'s reviews" beats "Following up").
@@ -443,6 +452,27 @@ Return ONLY this JSON shape (no markdown, no commentary):
     { "step": 2, "delay_days": 3, "subject": "...", "body": "..." },
     { "step": 3, "delay_days": 5, "subject": "...", "body": "..." }
   ],
+  "segments": [
+    {
+      "id": "seg_001",
+      "name": "...",
+      "description": "...",
+      "icp": {
+        "industries": ["..."],
+        "company_size": "e.g. 5-30 employees",
+        "target_titles": ["..."],
+        "geography": ["..."],
+        "qualification_signal": "...",
+        "disqualifiers": ["..."]
+      },
+      "value_angle": "Distinct 1-2 sentence pitch for THIS segment.",
+      "estimated_pool_size": 1200,
+      "status": "pending_approval",
+      "performance_score": null,
+      "runs_completed": 0,
+      "leads_remaining": 1200
+    }
+  ],
   "channel_flags": { "email": true, "phone": false, "linkedin": false },
   "escalation_rules": [
     { "after_step": 3, "action": "pause" }
@@ -465,14 +495,14 @@ Sequences must use {{contact_name}} and {{company_name}} placeholders where appr
     const parsed = parseJsonResponse<GeneratedPlaybookDraft>(text);
     if (!parsed.icp || !parsed.strategy || !parsed.sales_process || !parsed.sequences) {
       return {
-        playbook: deterministicFallbackPlaybook(client, answers),
+        playbook: ensureSegments(deterministicFallbackPlaybook(client, answers)),
         warning: "Claude returned an incomplete playbook — fallback used.",
       };
     }
-    return { playbook: parsed };
+    return { playbook: ensureSegments(parsed) };
   } catch (err) {
     return {
-      playbook: deterministicFallbackPlaybook(client, answers),
+      playbook: ensureSegments(deterministicFallbackPlaybook(client, answers)),
       warning: isAnthropicUnavailableError(err)
         ? ANTHROPIC_KEY_MISSING_MESSAGE
         : err instanceof Error
@@ -480,6 +510,77 @@ Sequences must use {{contact_name}} and {{company_name}} placeholders where appr
           : String(err),
     };
   }
+}
+
+/**
+ * Item 7 — ensure every draft has at least one PlaybookSegment so the
+ * downstream "Segments" review section + the Run Prospect-01 dropdown
+ * always have something to render. Claude's prompt asks for 8+, but
+ * defensive-coding wins: if the model returns nothing (or returns
+ * malformed segments) we synthesise a single segment that mirrors the
+ * playbook's catch-all ICP so the rest of the system keeps working.
+ */
+export function ensureSegments(draft: GeneratedPlaybookDraft): GeneratedPlaybookDraft {
+  const incoming = Array.isArray(draft.segments) ? draft.segments : [];
+  const normalised: PlaybookSegment[] = incoming
+    .map((s, i) => normaliseSegment(s, i, draft))
+    .filter((s): s is PlaybookSegment => s !== null);
+
+  if (normalised.length > 0) {
+    return { ...draft, segments: normalised };
+  }
+
+  // Synthesise a single segment from the catch-all ICP so the
+  // segment-aware flow always has at least one entry.
+  const seed: PlaybookSegment = {
+    id: "seg_001",
+    name: deriveSegmentName(draft),
+    description: draft.strategy?.value_proposition ?? "Default segment derived from the playbook ICP.",
+    icp: draft.icp,
+    value_angle: draft.strategy?.value_proposition ?? "",
+    estimated_pool_size: 0,
+    status: "pending_approval",
+    performance_score: null,
+    runs_completed: 0,
+    leads_remaining: 0,
+  };
+  return { ...draft, segments: [seed] };
+}
+
+function normaliseSegment(raw: unknown, idx: number, draft: GeneratedPlaybookDraft): PlaybookSegment | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const name = typeof r.name === "string" ? r.name : null;
+  if (!name) return null;
+  const icp = (r.icp && typeof r.icp === "object" ? r.icp : draft.icp) as PlaybookSegment["icp"];
+  const pool = typeof r.estimated_pool_size === "number" ? Math.max(0, Math.round(r.estimated_pool_size)) : 0;
+  const status = isValidSegmentStatus(r.status) ? (r.status as PlaybookSegment["status"]) : "pending_approval";
+  return {
+    id: typeof r.id === "string" && r.id.trim() ? r.id : `seg_${String(idx + 1).padStart(3, "0")}`,
+    name,
+    description: typeof r.description === "string" ? r.description : "",
+    icp,
+    value_angle: typeof r.value_angle === "string" ? r.value_angle : "",
+    estimated_pool_size: pool,
+    status,
+    performance_score:
+      typeof r.performance_score === "number" ? r.performance_score : null,
+    runs_completed: typeof r.runs_completed === "number" ? r.runs_completed : 0,
+    leads_remaining:
+      typeof r.leads_remaining === "number" ? Math.max(0, Math.round(r.leads_remaining)) : pool,
+  };
+}
+
+function isValidSegmentStatus(v: unknown): boolean {
+  return v === "pending_approval" || v === "active" || v === "exhausted" || v === "rejected";
+}
+
+function deriveSegmentName(draft: GeneratedPlaybookDraft): string {
+  const industry = draft.icp?.industries?.[0];
+  const geo = draft.icp?.geography?.[0];
+  if (industry && geo) return `${industry} in ${geo}`;
+  if (industry) return industry;
+  return "Default segment";
 }
 
 /**
@@ -604,6 +705,7 @@ export function appendSectionFeedbackRound(
 
 const SECTION_LABELS: Record<OnboardingSectionId, string> = {
   icp: "Ideal Customer Profile",
+  segments: "Target Segments",
   strategy: "Strategy & Key Messaging",
   voice_tone: "Voice & Tone",
   sequences: "Email Sequence",
@@ -619,6 +721,27 @@ const SECTION_SCHEMA_HINTS: Record<OnboardingSectionId, string> = {
   "qualification_signal": "...",
   "disqualifiers": ["..."]
 }`,
+  segments: `[
+  {
+    "id": "seg_001",
+    "name": "Independent restaurants in Sydney",
+    "description": "Family-owned single-location restaurants in metro Sydney with 5-30 staff.",
+    "icp": {
+      "industries": ["Food & Beverage"],
+      "company_size": "5-30 employees",
+      "target_titles": ["Owner", "General Manager"],
+      "geography": ["Sydney, Australia"],
+      "qualification_signal": "Active Instagram presence + at least one Google review in the last 30 days.",
+      "disqualifiers": ["Chain restaurants over 5 locations"]
+    },
+    "value_angle": "Distinct pitch tailored to this segment in 1-2 sentences.",
+    "estimated_pool_size": 1200,
+    "status": "pending_approval",
+    "performance_score": null,
+    "runs_completed": 0,
+    "leads_remaining": 1200
+  }
+]`,
   strategy: `{
   "value_proposition": "1-2 sentences anchored on what the contact actually said.",
   "key_messages": ["...", "...", "..."],
@@ -651,6 +774,7 @@ const SECTION_SCHEMA_HINTS: Record<OnboardingSectionId, string> = {
 
 const SECTION_KEYS: OnboardingSectionId[] = [
   "icp",
+  "segments",
   "strategy",
   "voice_tone",
   "sequences",
@@ -734,6 +858,7 @@ Hard rules:
 - voice_tone is INTERPRETED and CODIFIED, not copied.
 - sequences read like a senior copywriter who specialises in the client's industry. BLOCKED phrases (NEVER use): "I hope this finds you well", "circling back", "just touching base", "wanted to reach out", "synergy", "leverage", "thought I'd check in", "bumping this up". Use {{contact_name}} and {{company_name}} placeholders.
 - sales_process descriptions are short polished sentences. conditions reflect explicit rules the contact stated. Use canonical agent handles: prospect-01, outreach-01, sales-01, handover-01, human.
+- segments must contain AT LEAST 8 distinct micro-segments — each with its own ICP, value_angle, and realistic estimated_pool_size. Segments stay at status="pending_approval" with performance_score=null, runs_completed=0, leads_remaining=estimated_pool_size on first generation. Segment ids are stable strings ("seg_001", "seg_002", ...).
 
 You ALWAYS return a single JSON object with exactly two keys: "section" (the section id, must equal the requested section) and "content" (the new value for that section, in the exact schema requested). No markdown, no commentary.`;
 

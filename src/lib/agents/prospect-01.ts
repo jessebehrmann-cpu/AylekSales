@@ -37,8 +37,17 @@ import {
   findEmail as hunterFindEmail,
   hunterKeyFingerprint,
 } from "@/lib/hunter";
-import { getOrCreateTranslatedParams } from "@/lib/icp-translator";
-import type { ICP, Playbook, TranslatedApolloParams } from "@/lib/supabase/types";
+import {
+  getOrCreateSegmentTranslatedParams,
+  getOrCreateTranslatedParams,
+} from "@/lib/icp-translator";
+import { applyRunToSegment } from "@/lib/segments";
+import type {
+  ICP,
+  Playbook,
+  PlaybookSegment,
+  TranslatedApolloParams,
+} from "@/lib/supabase/types";
 
 export type ProspectFunnel = {
   /** People returned by Apollo search (pre-enrichment). */
@@ -67,6 +76,11 @@ export type ProspectRunResult = {
   translation_cache_hit: boolean;
   approval_id: string | null;
   lead_ids: string[];
+  /** Item 7 — present when the run targeted a specific segment. */
+  segment_id?: string;
+  segment_name?: string;
+  segment_runs_completed?: number;
+  segment_leads_remaining?: number;
 };
 
 export type ProspectRunFailure = {
@@ -77,12 +91,12 @@ export type ProspectRunFailure = {
 
 export async function runProspect01(
   clientId: string,
-  opts: { triggeredBy?: string; pageSize?: number } = {},
+  opts: { triggeredBy?: string; pageSize?: number; segmentId?: string } = {},
 ): Promise<ProspectRunResult | ProspectRunFailure> {
   const supabase = createServiceClient();
 
   console.log(
-    `[prospect-01] start client=${clientId} apollo=${apolloKeyFingerprint()} hunter=${hunterKeyFingerprint()}`,
+    `[prospect-01] start client=${clientId} segment=${opts.segmentId ?? "none"} apollo=${apolloKeyFingerprint()} hunter=${hunterKeyFingerprint()}`,
   );
 
   // 1. Load approved playbook
@@ -99,7 +113,26 @@ export async function runProspect01(
     };
   }
   const playbook = pb as Playbook;
-  const icp = (playbook.icp ?? {}) as ICP;
+
+  // Item 7 — resolve the ICP to source against. If a segmentId was
+  // supplied, use the segment's tighter ICP; otherwise fall back to the
+  // playbook's catch-all ICP. Rejected / exhausted segments are gated.
+  const allSegments = (playbook.segments ?? []) as PlaybookSegment[];
+  let activeSegment: PlaybookSegment | null = null;
+  if (opts.segmentId) {
+    activeSegment = allSegments.find((s) => s.id === opts.segmentId) ?? null;
+    if (!activeSegment) {
+      return { ok: false, error: `Segment ${opts.segmentId} not found on the approved playbook.` };
+    }
+    if (activeSegment.status === "rejected") {
+      return { ok: false, error: `Segment "${activeSegment.name}" was rejected — pick another.` };
+    }
+    if (activeSegment.status === "exhausted") {
+      return { ok: false, error: `Segment "${activeSegment.name}" is exhausted (0 leads remaining).` };
+    }
+  }
+
+  const icp: ICP = (activeSegment ? activeSegment.icp : playbook.icp) ?? {};
 
   if (!icp.target_titles?.length && !icp.industries?.length) {
     return {
@@ -108,13 +141,23 @@ export async function runProspect01(
     };
   }
 
-  // 2. Translate ICP (cached per playbook version)
-  const { params: translated, cacheHit } = await getOrCreateTranslatedParams({
-    supabase,
-    playbookId: playbook.id,
-    icp,
-    playbookVersion: playbook.version,
-  });
+  // 2. Translate ICP (cached per playbook version). Segment ICPs cache
+  //    onto the segment object inside playbook.segments[]; the catch-all
+  //    ICP caches onto playbook.icp.translated_params.
+  const { params: translated, cacheHit } = activeSegment
+    ? await getOrCreateSegmentTranslatedParams({
+        supabase,
+        playbookId: playbook.id,
+        segments: allSegments,
+        segmentId: activeSegment.id,
+        playbookVersion: playbook.version,
+      })
+    : await getOrCreateTranslatedParams({
+        supabase,
+        playbookId: playbook.id,
+        icp,
+        playbookVersion: playbook.version,
+      });
   console.log(
     `[prospect-01] translation ${cacheHit ? "cache hit" : "cache miss — Claude called"} (version ${translated.version})`,
   );
@@ -326,13 +369,14 @@ export async function runProspect01(
 
     const summary = buildApprovalSummary(funnel, campaign);
 
+    const titleSuffix = activeSegment ? ` (${activeSegment.name})` : "";
     const { data: appr, error: apprErr } = await supabase
       .from("approvals")
       .insert({
         client_id: clientId,
         type: "lead_list",
         status: "pending",
-        title: `Prospect-01 sourced ${funnel.new} new leads`,
+        title: `Prospect-01 sourced ${funnel.new} new leads${titleSuffix}`,
         summary,
         payload: {
           lead_ids: insertedLeadIds,
@@ -341,6 +385,8 @@ export async function runProspect01(
           funnel,
           translated_params: translated.apollo,
           translation_cache_hit: cacheHit,
+          segment_id: activeSegment?.id ?? null,
+          segment_name: activeSegment?.name ?? null,
         },
         related_campaign_id: campaign?.id ?? null,
         created_by: opts.triggeredBy ?? null,
@@ -351,6 +397,41 @@ export async function runProspect01(
       return { ok: false, error: `Approval create failed: ${apprErr?.message ?? "unknown"}` };
     }
     approvalId = appr.id;
+  }
+
+  // Item 7 — when this run targeted a specific segment, record a
+  // segment_runs row + decrement leads_remaining on the segment. Mark
+  // the segment as `exhausted` if the pool now sits at <= 0. Best-effort
+  // — failures here don't abort the run.
+  let segmentRunsCompleted: number | undefined;
+  let segmentLeadsRemaining: number | undefined;
+  if (activeSegment) {
+    const sourced = insertedLeadIds.length;
+    const delta = applyRunToSegment(activeSegment, sourced);
+
+    await supabase.from("segment_runs").insert({
+      client_id: clientId,
+      playbook_id: playbook.id,
+      segment_id: activeSegment.id,
+      leads_sourced: sourced,
+      leads_remaining: delta.leads_remaining,
+      ran_by: opts.triggeredBy ?? null,
+    });
+
+    const nextSegments = allSegments.map((s) =>
+      s.id === activeSegment!.id
+        ? {
+            ...s,
+            runs_completed: delta.runs_completed,
+            leads_remaining: delta.leads_remaining,
+            status: delta.status,
+          }
+        : s,
+    );
+    await supabase.from("playbooks").update({ segments: nextSegments }).eq("id", playbook.id);
+
+    segmentRunsCompleted = delta.runs_completed;
+    segmentLeadsRemaining = delta.leads_remaining;
   }
 
   await logEvent({
@@ -364,6 +445,10 @@ export async function runProspect01(
       translated_params: translated.apollo,
       translation_cache_hit: cacheHit,
       approval_id: approvalId,
+      segment_id: activeSegment?.id ?? null,
+      segment_name: activeSegment?.name ?? null,
+      segment_runs_completed: segmentRunsCompleted ?? null,
+      segment_leads_remaining: segmentLeadsRemaining ?? null,
     },
   });
 
@@ -375,6 +460,10 @@ export async function runProspect01(
     translation_cache_hit: cacheHit,
     approval_id: approvalId,
     lead_ids: insertedLeadIds,
+    segment_id: activeSegment?.id,
+    segment_name: activeSegment?.name,
+    segment_runs_completed: segmentRunsCompleted,
+    segment_leads_remaining: segmentLeadsRemaining,
   };
 }
 

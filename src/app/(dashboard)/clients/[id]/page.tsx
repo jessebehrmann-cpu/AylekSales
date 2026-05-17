@@ -14,7 +14,12 @@ import { InviteOwnerForm } from "./invite-owner-form";
 import { ExternalLink, Users, Send, UserCircle } from "lucide-react";
 import { resolveProviders } from "@/lib/agents/providers";
 import { describeEvent } from "@/lib/event-format";
-import type { AppEvent, OnboardingSession } from "@/lib/supabase/types";
+import type {
+  AppEvent,
+  OnboardingSession,
+  Playbook,
+  PlaybookSegment,
+} from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +62,17 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   if (!client) notFound();
   const onboardingSessions = (onboardingRows ?? []) as OnboardingSession[];
   const providerConfig = resolveProviders();
+
+  // Item 7 — surface active segments to the Run Prospect-01 button so HOS
+  // can pick which segment to run against. Best-effort: no playbook → no
+  // segments → button falls back to the catch-all ICP behaviour.
+  const { data: pbRow } = await supabase
+    .from("playbooks")
+    .select("segments")
+    .eq("client_id", params.id)
+    .eq("status", "approved")
+    .maybeSingle();
+  const segments = ((pbRow as Pick<Playbook, "segments"> | null)?.segments ?? []) as PlaybookSegment[];
 
   return (
     <>
@@ -181,7 +197,11 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
               Sources contacts via Apollo against this client&apos;s approved playbook ICP. New leads land in the approval queue.
             </p>
           </div>
-          <RunProspectButton clientId={client.id} providerConfig={providerConfig} />
+          <RunProspectButton
+            clientId={client.id}
+            providerConfig={providerConfig}
+            segments={segments}
+          />
         </CardHeader>
       </Card>
 

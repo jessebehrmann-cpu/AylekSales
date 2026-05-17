@@ -9,7 +9,10 @@ import { createClient } from "@/lib/supabase/server";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const Body = z.object({ client_id: z.string().uuid() });
+const Body = z.object({
+  client_id: z.string().uuid(),
+  segment_id: z.string().min(1).max(100).optional(),
+});
 
 /**
  * POST /api/agents/prospect
@@ -59,6 +62,7 @@ export async function POST(req: NextRequest) {
 
   const result = await runProspect01(parsed.data.client_id, {
     triggeredBy: triggeredBy ?? undefined,
+    segmentId: parsed.data.segment_id,
   });
   if (!result.ok) {
     return NextResponse.json(result, { status: result.config_error ? 400 : 500 });

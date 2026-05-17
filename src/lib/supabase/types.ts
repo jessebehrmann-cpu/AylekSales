@@ -116,6 +116,16 @@ export type Database = {
         Update: Partial<UsageEvent>;
         Relationships: [];
       };
+      segment_runs: {
+        Row: SegmentRun;
+        Insert: Partial<Omit<SegmentRun, "client_id" | "playbook_id" | "segment_id">> & {
+          client_id: string;
+          playbook_id: string;
+          segment_id: string;
+        };
+        Update: Partial<SegmentRun>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;
@@ -367,7 +377,8 @@ export type ApprovalType =
   | "human_stage_task"
   | "proposal_review"
   | "playbook_approval"
-  | "reply_review";
+  | "reply_review"
+  | "segment_proposal";
 
 /** Payload for type='reply_review' approvals — drafted by the inbound
  *  classifier from the playbook's reply_strategy template + the lead's
@@ -569,6 +580,39 @@ export type SalesProcessStage = {
   condition?: string | null;
 };
 
+/**
+ * Item 7 — per-playbook market segments. Each segment is a focused
+ * micro-ICP with its own value angle. Prospect-01 runs against ONE
+ * segment per invocation, not against playbook.icp. Whole-playbook
+ * approval is intentionally NOT gated on segments being decided — that
+ * gate activates after client 3. Until then, the 5 playbook sections
+ * gate approval and segments are reviewed independently.
+ */
+export type PlaybookSegmentStatus =
+  | "pending_approval"
+  | "active"
+  | "exhausted"
+  | "rejected";
+
+export type PlaybookSegment = {
+  /** Stable per-playbook id (e.g. "seg_001") — used by segment_runs. */
+  id: string;
+  name: string;
+  description: string;
+  /** Segment-scoped ICP. Translated by lib/icp-translator.ts on first run
+   *  and cached on the segment itself (translated_params on the ICP). */
+  icp: ICP;
+  /** Distinct pitch for this segment — Outreach-01 + Sales-01 weave this
+   *  into their drafts so messaging stays segment-specific. */
+  value_angle: string;
+  estimated_pool_size: number;
+  status: PlaybookSegmentStatus;
+  /** 0-100, updated by Learning-01. null until enough signal to score. */
+  performance_score: number | null;
+  runs_completed: number;
+  leads_remaining: number;
+};
+
 export type Playbook = {
   id: string;
   client_id: string;
@@ -583,6 +627,14 @@ export type Playbook = {
   reply_strategy: ReplyStrategy;
   team_members: TeamMember[];
   sales_process: SalesProcessStage[];
+  /** Item 7 — segment library. Empty array on playbooks generated before
+   *  the segment-aware onboarding rolled out. */
+  segments?: PlaybookSegment[];
+  /** Item 8 — Close-01 reads this when drafting proposals. When null/
+   *  undefined the proposal goes out without a Stripe payment link and
+   *  HOS follows up manually. TS-only today; no DB column required since
+   *  it's read from the JSON payload. */
+  pricing_cents?: number | null;
   notes: string | null;
   created_by: string | null;
   approved_by: string | null;
@@ -590,6 +642,35 @@ export type Playbook = {
   submitted_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+/**
+ * One Prospect-01 invocation against a specific segment. Powers the
+ * "Run N of M (X leads left)" counter on the Run Prospect-01 dropdown +
+ * Learning-01's per-segment performance scoring.
+ */
+export type SegmentRun = {
+  id: string;
+  client_id: string;
+  playbook_id: string;
+  segment_id: string;
+  leads_sourced: number;
+  leads_remaining: number | null;
+  performance_score: number | null;
+  ran_at: string;
+  ran_by: string | null;
+};
+
+/**
+ * Payload shape for type='segment_proposal' approvals — Learning-01
+ * generates one when a segment is exhausted, scoring high, or 30+ days
+ * since last proposal. HOS approves to add it to playbook.segments[].
+ */
+export type SegmentProposalPayload = {
+  segment: PlaybookSegment;
+  reason: "segment_exhausted" | "high_performer" | "periodic_refresh" | "manual";
+  evidence: string;
+  predicted_impact?: string | null;
 };
 
 export type PlaybookVersion = {
@@ -651,10 +732,14 @@ export type OnboardingAnswer = {
   asked_at: string;
 };
 
-/** The five reviewable playbook sections in order. The contact approves
- *  each one independently before the playbook is written. */
+/** The reviewable playbook sections in order. The contact approves
+ *  each one independently before the playbook is written. Item 7 added
+ *  "segments" between icp and strategy — informational today (advancing
+ *  is not gated on every segment being decided) but the per-segment
+ *  approve/reject state writes through to playbooks.segments[].status. */
 export type OnboardingSectionId =
   | "icp"
+  | "segments"
   | "strategy"
   | "voice_tone"
   | "sequences"
@@ -700,6 +785,9 @@ export type GeneratedPlaybookDraft = {
   team_members: TeamMember[];
   sales_process: SalesProcessStage[];
   sequences: PlaybookSequenceStep[];
+  /** Item 7 — segment library. Optional on existing drafts; required
+   *  going forward via the extended onboarding prompt. */
+  segments?: PlaybookSegment[];
   channel_flags?: ChannelFlags;
   escalation_rules?: EscalationRule[];
   notes?: string | null;

@@ -49,7 +49,12 @@ export async function POST(
 
   // Gate: every section must be marked approved by the contact via the
   // section-by-section review flow before the playbook gets written and
-  // the HOS approval is created.
+  // the HOS approval is created. NOTE: Item 7 added a "segments" section
+  // that is intentionally NOT in this list — per the master brief
+  // refinement, whole-playbook approval is not gated on segment decisions
+  // (that gate activates after client 3). Contacts can flip individual
+  // segment statuses; rejected segments are filtered out of the written
+  // playbook below, but the playbook itself ships either way.
   const REQUIRED_SECTIONS: OnboardingSectionId[] = [
     "icp",
     "strategy",
@@ -101,6 +106,11 @@ export async function POST(
       reply_strategy: draft.reply_strategy,
       team_members: draft.team_members,
       sales_process: draft.sales_process,
+      // Item 7 — carry segments through, dropping any the contact explicitly
+      // rejected during section review. Contacts who never flipped a status
+      // leave segments at "pending_approval"; those still write through and
+      // HOS can flip them from the playbook editor later.
+      segments: (draft.segments ?? []).filter((s) => s.status !== "rejected"),
       notes: draft.notes ?? null,
       submitted_at: new Date().toISOString(),
     })

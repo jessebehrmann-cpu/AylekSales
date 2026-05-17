@@ -43,6 +43,7 @@ import type {
   PlaybookApprovalPayload,
   ProposalReviewPayload,
   ReplyReviewPayload,
+  SegmentProposalPayload,
   StrategyChangePayload,
 } from "@/lib/supabase/types";
 import { formatDateTime } from "@/lib/utils";
@@ -91,6 +92,9 @@ export function ApprovalCard({
         )}
         {approval.type === "reply_review" && (
           <ReplyReviewBody approval={approval} isPending={isPending} />
+        )}
+        {approval.type === "segment_proposal" && (
+          <SegmentProposalBody approval={approval} isPending={isPending} />
         )}
 
         {!isPending && approval.decided_at && (
@@ -145,6 +149,12 @@ function headerMetaFor(type: Approval["type"]) {
       };
     case "reply_review":
       return { label: "Reply review", icon: Mail, iconBg: "bg-blue-100 text-blue-700" };
+    case "segment_proposal":
+      return {
+        label: "Segment proposal",
+        icon: Search,
+        iconBg: "bg-teal-100 text-teal-700",
+      };
     default:
       return { label: String(type), icon: Search, iconBg: "bg-muted text-muted-foreground" };
   }
@@ -771,4 +781,156 @@ function ReplyReviewBody({
 function stringify(v: unknown): string {
   if (typeof v === "string") return v.length > 60 ? `"${v.slice(0, 60)}…"` : `"${v}"`;
   return JSON.stringify(v);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Segment proposal body (Item 7)
+//
+// Learning-01 (Item 9) opens these when a segment is exhausted, scoring
+// high, or 30+ days since last proposal. Approving appends the proposed
+// segment to the client's approved playbook with status='active' so
+// Prospect-01 can immediately run against it. Rejecting leaves the
+// playbook untouched.
+// ──────────────────────────────────────────────────────────────────────────
+
+function SegmentProposalBody({
+  approval,
+  isPending,
+}: {
+  approval: ApprovalRow;
+  isPending: boolean;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  const payload = approval.payload as SegmentProposalPayload;
+  const seg = payload?.segment;
+  const reasonLabel = labelForReason(payload?.reason);
+
+  function onApprove() {
+    setError(null);
+    if (!confirm("Approve this segment? It will go live immediately and Prospect-01 can source against it.")) return;
+    start(async () => {
+      const r = await approveApproval({ id: approval.id });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  function onReject() {
+    setError(null);
+    if (!confirm("Reject this segment proposal?")) return;
+    start(async () => {
+      const r = await rejectApproval({ id: approval.id });
+      if (!r.ok) {
+        setError(r.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  if (!seg) {
+    return (
+      <Alert variant="destructive">
+        Segment proposal payload is missing a segment. Reject and ask Learning-01 to
+        regenerate.
+      </Alert>
+    );
+  }
+
+  return (
+    <>
+      {approval.summary && (
+        <p className="mb-3 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          {approval.summary}
+        </p>
+      )}
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-base font-semibold">{seg.name}</p>
+          <span className="rounded-full border border-border bg-background px-2 py-0.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+            {reasonLabel}
+          </span>
+        </div>
+        {seg.description && <p className="text-sm text-muted-foreground">{seg.description}</p>}
+
+        {seg.value_angle && (
+          <div className="rounded-md border border-border bg-background/50 p-3 text-sm">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Distinct pitch
+            </p>
+            <p className="mt-1">{seg.value_angle}</p>
+          </div>
+        )}
+
+        <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+          <p>
+            <span className="font-medium text-foreground">Industries:</span>{" "}
+            {(seg.icp.industries ?? []).join(", ") || "—"}
+          </p>
+          <p>
+            <span className="font-medium text-foreground">Titles:</span>{" "}
+            {(seg.icp.target_titles ?? []).join(", ") || "—"}
+          </p>
+          <p>
+            <span className="font-medium text-foreground">Geography:</span>{" "}
+            {(seg.icp.geography ?? []).join(", ") || "—"}
+          </p>
+          <p>
+            <span className="font-medium text-foreground">Pool size:</span>{" "}
+            {seg.estimated_pool_size.toLocaleString()} prospects
+          </p>
+        </div>
+
+        {payload.evidence && (
+          <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Why now
+            </p>
+            <p className="mt-1 whitespace-pre-wrap">{payload.evidence}</p>
+          </div>
+        )}
+
+        {payload.predicted_impact && (
+          <p className="text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">Predicted impact:</span>{" "}
+            {payload.predicted_impact}
+          </p>
+        )}
+      </div>
+
+      {error && <Alert variant="destructive" className="mt-3">{error}</Alert>}
+
+      {isPending && (
+        <div className="mt-4 flex gap-2">
+          <Button onClick={onApprove} disabled={pending} size="sm">
+            <Check className="mr-1.5 h-4 w-4" /> Approve & add to playbook
+          </Button>
+          <Button onClick={onReject} disabled={pending} size="sm" variant="outline">
+            <X className="mr-1.5 h-4 w-4" /> Reject
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function labelForReason(reason: SegmentProposalPayload["reason"] | undefined): string {
+  switch (reason) {
+    case "segment_exhausted":
+      return "Segment exhausted";
+    case "high_performer":
+      return "High performer";
+    case "periodic_refresh":
+      return "Periodic refresh";
+    case "manual":
+      return "Manual proposal";
+    default:
+      return "Segment proposal";
+  }
 }

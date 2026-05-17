@@ -13,7 +13,9 @@ import type {
   Approval,
   LeadListPayload,
   Playbook,
+  PlaybookSegment,
   PlaybookSequenceStep,
+  SegmentProposalPayload,
   StrategyChangePayload,
 } from "@/lib/supabase/types";
 
@@ -91,6 +93,10 @@ export async function approveApproval(input: unknown): Promise<ActionResult> {
       const r = await applyPlaybookApproval(approval, user.auth.id);
       if (!r.ok) return r;
       summaryForLog = { kind: "playbook_approval_approved", ...r.summary };
+    } else if (approval.type === "segment_proposal") {
+      const r = await applySegmentProposalApproval(approval);
+      if (!r.ok) return r;
+      summaryForLog = { kind: "segment_proposal_approved", ...r.summary };
     } else {
       return { ok: false, error: `Unknown approval type: ${approval.type}` };
     }
@@ -1061,4 +1067,74 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown): vo
     }
   }
   (cur as Record<string, unknown>)[parts[parts.length - 1] as string] = value;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Segment proposal approvals (Item 7)
+//
+// Learning-01 (Item 9) generates these when a segment is exhausted, scoring
+// high, or 30+ days since the last proposal for the client. The payload
+// carries the candidate PlaybookSegment + evidence + predicted impact.
+// Approving appends the segment to playbooks.segments[] with status='active'
+// so Prospect-01 can immediately run against it. Rejecting just flips the
+// approval to rejected; no playbook write.
+// ──────────────────────────────────────────────────────────────────────────
+
+async function applySegmentProposalApproval(
+  approval: Approval,
+): Promise<{ ok: true; summary: Record<string, unknown> } | { ok: false; error: string }> {
+  const supabase = createClient();
+  const payload = approval.payload as SegmentProposalPayload;
+  if (!payload?.segment?.id) {
+    return { ok: false, error: "Segment proposal payload is missing a segment id." };
+  }
+
+  const { data: pbRow } = await supabase
+    .from("playbooks")
+    .select("id, version, segments")
+    .eq("client_id", approval.client_id)
+    .eq("status", "approved")
+    .maybeSingle();
+  if (!pbRow) {
+    return {
+      ok: false,
+      error:
+        "No approved playbook found for this client — segment proposal can't be appended.",
+    };
+  }
+  const playbook = pbRow as Pick<Playbook, "id" | "version" | "segments">;
+  const existing = (playbook.segments ?? []) as PlaybookSegment[];
+  // Dedup by id: if the proposal id collides with an existing segment we
+  // refuse rather than silently overwriting — Learning-01 should generate
+  // fresh ids per proposal, but defence in depth.
+  if (existing.some((s) => s.id === payload.segment.id)) {
+    return { ok: false, error: `Segment ${payload.segment.id} already exists on the playbook.` };
+  }
+
+  const newSegment: PlaybookSegment = {
+    ...payload.segment,
+    status: "active",
+    runs_completed: 0,
+    leads_remaining:
+      typeof payload.segment.leads_remaining === "number"
+        ? payload.segment.leads_remaining
+        : payload.segment.estimated_pool_size,
+    performance_score: payload.segment.performance_score ?? null,
+  };
+
+  const { error: updErr } = await supabase
+    .from("playbooks")
+    .update({ segments: [...existing, newSegment] })
+    .eq("id", playbook.id);
+  if (updErr) return { ok: false, error: updErr.message };
+
+  return {
+    ok: true,
+    summary: {
+      playbook_id: playbook.id,
+      segment_id: newSegment.id,
+      segment_name: newSegment.name,
+      reason: payload.reason,
+    },
+  };
 }

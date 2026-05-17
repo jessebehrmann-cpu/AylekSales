@@ -22,6 +22,7 @@ import type {
   OnboardingFeedbackRound,
   OnboardingSectionId,
   OnboardingStatus,
+  PlaybookSegment,
   PlaybookSequenceStep,
   SalesProcessStage,
 } from "@/lib/supabase/types";
@@ -43,6 +44,7 @@ type Stage =
 // for API + DB consistency.
 const SECTIONS: Array<{ id: OnboardingSectionId; label: string }> = [
   { id: "icp", label: "Your ideal customer" },
+  { id: "segments", label: "Your target segments" },
   { id: "strategy", label: "Your sales approach" },
   { id: "voice_tone", label: "How you communicate" },
   { id: "sequences", label: "Your outreach emails" },
@@ -593,7 +595,14 @@ export function OnboardingClient(props: {
                   </div>
                 </div>
               )}
-              <SectionView section={section.id} playbook={playbook} />
+              <SectionView
+                section={section.id}
+                playbook={playbook}
+                token={props.token}
+                onSegmentsChange={(segments) =>
+                  setPlaybook((pb) => (pb ? { ...pb, segments } : pb))
+                }
+              />
             </div>
 
             {error && (
@@ -808,6 +817,8 @@ function sectionIntro(s: OnboardingSectionId, companyName: string): string {
   switch (s) {
     case "icp":
       return `The customers we'll go after for ${companyName} — industries, company types, and the people we'll reach out to inside them.`;
+    case "segments":
+      return `Your broad ICP, sliced into focused micro-segments. Each one gets its own pitch and its own outreach run. Approve the ones you want us to chase first; reject anything that's a wrong fit.`;
     case "strategy":
       return `Your value proposition, the messages that land, and how to handle the objections you actually hear.`;
     case "voice_tone":
@@ -822,13 +833,25 @@ function sectionIntro(s: OnboardingSectionId, companyName: string): string {
 function SectionView({
   section,
   playbook,
+  token,
+  onSegmentsChange,
 }: {
   section: OnboardingSectionId;
   playbook: GeneratedPlaybookDraft;
+  token: string;
+  onSegmentsChange: (segments: PlaybookSegment[]) => void;
 }) {
   switch (section) {
     case "icp":
       return <IcpView icp={playbook.icp} />;
+    case "segments":
+      return (
+        <SegmentsView
+          segments={playbook.segments ?? []}
+          token={token}
+          onChange={onSegmentsChange}
+        />
+      );
     case "strategy":
       return <StrategyView strategy={playbook.strategy} />;
     case "voice_tone":
@@ -956,6 +979,171 @@ function SequencesView({
         </li>
       ))}
     </ol>
+  );
+}
+
+/**
+ * Item 7 — segment review. Renders one card per segment with name +
+ * description + value_angle + per-segment ICP highlights + a pool-size
+ * badge + approve/reject buttons. The buttons hit
+ * `/api/onboarding/[token]/segment-status` so the in-flight session
+ * remembers the contact's choices; the eventual whole-playbook write
+ * filters out rejected segments.
+ *
+ * The "Approve & continue" button on the parent section card is NOT
+ * gated on every segment being decided (per master brief refinement).
+ * Anything left at `pending_approval` writes through and HOS can flip
+ * it later from the playbook editor.
+ */
+function SegmentsView({
+  segments,
+  token,
+  onChange,
+}: {
+  segments: PlaybookSegment[];
+  token: string;
+  onChange: (next: PlaybookSegment[]) => void;
+}) {
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  if (segments.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        No segments were generated. You can keep going — Prospect-01 will fall
+        back to the broader ICP for now and we&apos;ll build segments after
+        we&apos;ve seen the first results.
+      </p>
+    );
+  }
+
+  async function flip(seg: PlaybookSegment, status: "active" | "rejected") {
+    setError(null);
+    setPendingId(seg.id);
+    try {
+      const res = await fetch(`/api/onboarding/${token}/segment-status`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ segment_id: seg.id, status }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        ok: boolean;
+        error?: string;
+        segments?: PlaybookSegment[];
+      } | null;
+      if (!json?.ok || !json.segments) {
+        setError(json?.error ?? "Failed to update segment. Please try again.");
+        return;
+      }
+      onChange(json.segments);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPendingId(null);
+    }
+  }
+
+  const counts = segments.reduce(
+    (acc, s) => {
+      acc[s.status] = (acc[s.status] ?? 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+        <span>
+          <strong className="text-foreground">{segments.length}</strong> segments
+        </span>
+        {counts.active ? <span>· {counts.active} active</span> : null}
+        {counts.rejected ? <span>· {counts.rejected} rejected</span> : null}
+        {counts.pending_approval ? (
+          <span>· {counts.pending_approval} not yet decided</span>
+        ) : null}
+      </div>
+
+      {error && <Alert variant="destructive">{error}</Alert>}
+
+      <ul className="space-y-3">
+        {segments.map((seg) => {
+          const isPending = pendingId === seg.id;
+          const isRejected = seg.status === "rejected";
+          const isActive = seg.status === "active";
+          return (
+            <li
+              key={seg.id}
+              className={`rounded-lg border p-4 transition-colors ${
+                isRejected
+                  ? "border-border/60 bg-muted/30 opacity-70"
+                  : isActive
+                    ? "border-emerald-300 bg-emerald-50/40"
+                    : "border-border/60 bg-background/40"
+              }`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium">{seg.name}</p>
+                  {seg.description && (
+                    <p className="mt-0.5 text-sm text-muted-foreground">
+                      {seg.description}
+                    </p>
+                  )}
+                </div>
+                <span className="shrink-0 rounded-full border border-border/70 bg-background px-2 py-0.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+                  {seg.estimated_pool_size > 0
+                    ? `${seg.estimated_pool_size.toLocaleString()} prospects`
+                    : "Pool TBD"}
+                </span>
+              </div>
+
+              {seg.value_angle && (
+                <p className="mt-3 rounded-md border border-border/60 bg-background/60 p-3 text-sm">
+                  <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Pitch for this segment
+                  </span>
+                  <span className="mt-1 block">{seg.value_angle}</span>
+                </p>
+              )}
+
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                {(seg.icp.industries ?? []).slice(0, 3).map((ind) => (
+                  <span key={ind}>· {ind}</span>
+                ))}
+                {seg.icp.geography?.[0] && <span>· {seg.icp.geography[0]}</span>}
+                {seg.icp.company_size && <span>· {seg.icp.company_size}</span>}
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant={isActive ? "default" : "outline"}
+                  onClick={() => flip(seg, "active")}
+                  disabled={isPending}
+                >
+                  <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                  {isActive ? "Active" : "Approve"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant={isRejected ? "secondary" : "ghost"}
+                  onClick={() => flip(seg, "rejected")}
+                  disabled={isPending}
+                >
+                  {isRejected ? "Rejected" : "Not a fit"}
+                </Button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
+      <p className="text-xs text-muted-foreground">
+        Skipping is fine — anything you don&apos;t decide on goes through as
+        &quot;pending&quot; and we&apos;ll review it together later.
+      </p>
+    </div>
   );
 }
 
