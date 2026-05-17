@@ -10,6 +10,11 @@ import { Users, Upload, Plus } from "lucide-react";
 import { InlineApprovalCell } from "./inline-approval-cell";
 import { ProcessStageCell } from "./process-stage-cell";
 import { LeadStatusPill } from "./lead-status-pill";
+import {
+  BulkActionsBar,
+  LeadCheckbox,
+  SelectAllPendingCheckbox,
+} from "./bulk-actions";
 import { computeLeadStatus, fetchProposalApprovalSets } from "@/lib/lead-status";
 import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
 import type { LeadApprovalStatus, LeadStage, SalesProcessStage } from "@/lib/supabase/types";
@@ -34,7 +39,13 @@ type LeadRow = {
 export default async function LeadsPage({
   searchParams,
 }: {
-  searchParams: { client?: string; stage?: string; q?: string; approval?: string };
+  searchParams: {
+    client?: string;
+    stage?: string;
+    q?: string;
+    approval?: string;
+    approval_status?: string;
+  };
 }) {
   const supabase = createClient();
 
@@ -56,9 +67,12 @@ export default async function LeadsPage({
     }
   }
 
+  // Sort pending-approval rows to the top by default so HOS sees the
+  // queue first. Then newest-first within each bucket.
   let query = supabase
     .from("leads")
     .select("*, clients(name)")
+    .order("approval_status", { ascending: true }) // pending_approval < approved < rejected alphabetically
     .order("created_at", { ascending: false })
     .limit(200);
 
@@ -68,6 +82,12 @@ export default async function LeadsPage({
   if (searchParams.client) query = query.eq("client_id", searchParams.client);
   // Map a sales-process stage filter to leads.process_stage_id.
   if (searchParams.stage) query = query.eq("process_stage_id", searchParams.stage);
+  if (searchParams.approval_status) {
+    query = query.eq(
+      "approval_status",
+      searchParams.approval_status as LeadApprovalStatus,
+    );
+  }
   if (searchParams.q) {
     const q = searchParams.q.replace(/[%]/g, "");
     query = query.or(`company_name.ilike.%${q}%,contact_name.ilike.%${q}%,email.ilike.%${q}%`);
@@ -175,10 +195,33 @@ export default async function LeadsPage({
           </select>
         )}
         <Button type="submit" size="sm" variant="outline">Apply</Button>
-        {(searchParams.client || searchParams.stage || searchParams.q || searchParams.approval) && (
+        {(searchParams.client || searchParams.stage || searchParams.q || searchParams.approval || searchParams.approval_status) && (
           <Button asChild type="button" size="sm" variant="ghost"><Link href="/leads">Clear</Link></Button>
         )}
       </form>
+
+      {/* Filter chips */}
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-medium uppercase tracking-wider text-muted-foreground">Quick filter</span>
+        <Link
+          href="/leads"
+          className={`rounded-full border px-3 py-1 ${!searchParams.approval_status ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted"}`}
+        >
+          All
+        </Link>
+        <Link
+          href="/leads?approval_status=pending_approval"
+          className={`rounded-full border px-3 py-1 ${searchParams.approval_status === "pending_approval" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted"}`}
+        >
+          Pending approval
+        </Link>
+        <Link
+          href="/leads?approval_status=approved"
+          className={`rounded-full border px-3 py-1 ${searchParams.approval_status === "approved" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:bg-muted"}`}
+        >
+          Approved
+        </Link>
+      </div>
 
       {!leads || leads.length === 0 ? (
         <EmptyState
@@ -188,21 +231,39 @@ export default async function LeadsPage({
           action={<Button asChild><Link href="/leads/import">Import CSV</Link></Button>}
         />
       ) : (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Company</TableHead>
-                  <TableHead>Client</TableHead>
-                  <TableHead>Contact</TableHead>
-                  <TableHead>Title</TableHead>
-                  <TableHead>Process stage</TableHead>
-                  <TableHead>{showApprovalColumn ? "Decide" : "Status"}</TableHead>
-                  <TableHead>Last contact</TableHead>
-                  <TableHead className="text-right">Value</TableHead>
-                </TableRow>
-              </TableHeader>
+        <>
+          {(() => {
+            const pendingIds = (leads as LeadRow[])
+              .filter((l) => l.approval_status === "pending_approval")
+              .map((l) => l.id);
+            return pendingIds.length > 0 ? (
+              <BulkActionsBar allPendingIds={pendingIds} />
+            ) : null;
+          })()}
+          <Card>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-10">
+                      <SelectAllPendingCheckbox
+                        disabled={
+                          (leads as LeadRow[]).filter(
+                            (l) => l.approval_status === "pending_approval",
+                          ).length === 0
+                        }
+                      />
+                    </TableHead>
+                    <TableHead>Company</TableHead>
+                    <TableHead>Client</TableHead>
+                    <TableHead>Contact</TableHead>
+                    <TableHead>Title</TableHead>
+                    <TableHead>Process stage</TableHead>
+                    <TableHead>{showApprovalColumn ? "Decide" : "Status"}</TableHead>
+                    <TableHead>Last contact</TableHead>
+                    <TableHead className="text-right">Value</TableHead>
+                  </TableRow>
+                </TableHeader>
               <TableBody>
                 {(leads as LeadRow[]).map((l) => {
                   const stages = (l.client_id && stagesByClient.get(l.client_id)) || [];
@@ -220,6 +281,11 @@ export default async function LeadsPage({
                   });
                   return (
                     <TableRow key={l.id}>
+                      <TableCell className="w-10">
+                        {l.approval_status === "pending_approval" ? (
+                          <LeadCheckbox leadId={l.id} />
+                        ) : null}
+                      </TableCell>
                       <TableCell>
                         <Link href={`/leads/${l.id}`} className="font-medium hover:underline">{l.company_name}</Link>
                       </TableCell>
@@ -250,10 +316,11 @@ export default async function LeadsPage({
                     </TableRow>
                   );
                 })}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </>
       )}
     </>
   );
