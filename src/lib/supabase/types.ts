@@ -126,6 +126,16 @@ export type Database = {
         Update: Partial<SegmentRun>;
         Relationships: [];
       };
+      proposals: {
+        Row: Proposal;
+        Insert: Partial<Omit<Proposal, "lead_id" | "html_content" | "subject">> & {
+          lead_id: string;
+          html_content: string;
+          subject: string;
+        };
+        Update: Partial<Proposal>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;
@@ -378,7 +388,8 @@ export type ApprovalType =
   | "proposal_review"
   | "playbook_approval"
   | "reply_review"
-  | "segment_proposal";
+  | "segment_proposal"
+  | "deal_cold";
 
 /** Payload for type='reply_review' approvals — drafted by the inbound
  *  classifier from the playbook's reply_strategy template + the lead's
@@ -848,4 +859,68 @@ export type UsageEvent = {
   cost_cents: number;
   payload: Json;
   occurred_at: string;
+};
+
+// ── Proposals (Item 8 — Close-01) ────────────────────────────────────────
+
+export type ProposalStatus =
+  | "draft"
+  | "sent"
+  | "viewed"
+  | "accepted"
+  | "paid"
+  | "expired"
+  | "rejected";
+
+/**
+ * Item 8 — HTML proposal drafted by Close-01 after a successful meeting.
+ * Replaces the email-only proposal_review flow for new leads (existing
+ * proposal_review approvals continue to work). The lead opens
+ * /p/[token] to view + accept; when amount_cents is set, accepting
+ * triggers a Stripe Payment Link.
+ */
+export type Proposal = {
+  id: string;
+  token: string;
+  client_id: string | null;
+  lead_id: string;
+  meeting_id: string | null;
+  meeting_note_id: string | null;
+  html_content: string;
+  subject: string;
+  status: ProposalStatus;
+  stripe_payment_link_id: string | null;
+  stripe_payment_link_url: string | null;
+  amount_cents: number | null;
+  currency: string | null;
+  view_count: number;
+  viewed_at: string | null;
+  accepted_at: string | null;
+  paid_at: string | null;
+  expires_at: string | null;
+  followup_sent_at: string | null;
+  cold_flagged_at: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
+/**
+ * Payload shape for type='deal_cold' approvals — Close-01 opens these
+ * when a proposal sat at status='sent' with no open for 48h, or at
+ * status='viewed' with no accept for 5 days. HOS sees the lead + the
+ * proposal link + the cold reason and chooses to manually nudge the
+ * lead, mark the lead lost, or close out the proposal.
+ */
+export type DealColdPayload = {
+  proposal_id: string;
+  lead_id: string;
+  /** Why we flagged it cold. */
+  reason: "no_view_48h" | "no_accept_5d" | "manual";
+  /** Echoed for the approval card so HOS doesn't need to click through. */
+  lead_name: string;
+  proposal_subject: string;
+  proposal_url: string;
+  amount_cents: number | null;
+  /** Hours / days since the relevant timestamp (sent_at or viewed_at). */
+  staleness_hours: number;
 };

@@ -12,15 +12,21 @@
     {
       "path": "/api/cron/weekly-digest",
       "schedule": "0 9 * * 1"
+    },
+    {
+      "path": "/api/cron/close-01",
+      "schedule": "0 */4 * * *"
     }
   ],
   "functions": {
     "src/app/api/cron/send-emails/route.ts": { "maxDuration": 60 },
     "src/app/api/cron/weekly-digest/route.ts": { "maxDuration": 60 },
+    "src/app/api/cron/close-01/route.ts": { "maxDuration": 60 },
     "src/app/api/agents/prospect/route.ts": { "maxDuration": 60 },
     "src/app/api/agents/learning/route.ts": { "maxDuration": 60 },
     "src/app/api/webhooks/resend/route.ts": { "maxDuration": 30 },
     "src/app/api/webhooks/stripe/route.ts": { "maxDuration": 30 },
-    "src/app/api/webhooks/cal-com/route.ts": { "maxDuration": 30 }
+    "src/app/api/webhooks/cal-com/route.ts": { "maxDuration": 30 },
+    "src/app/api/proposals/[token]/accept/route.ts": { "maxDuration": 30 }
   }
 }

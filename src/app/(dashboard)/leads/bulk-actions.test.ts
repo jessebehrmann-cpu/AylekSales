@@ -26,6 +26,18 @@ const mocks = vi.hoisted(() => ({
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock("@/lib/auth", () => ({ requireUser: mocks.requireUser }));
 vi.mock("@/lib/events", () => ({ logEvent: mocks.logEvent }));
+// Item 8 — leads/actions.ts now transitively imports lib/resend (via
+// lib/agents/close-01). We don't exercise the email path in this test, so
+// stub the module out — the real `new Resend(undefined)` constructor
+// throws when RESEND_API_KEY isn't set in the vitest env.
+vi.mock("@/lib/resend", () => ({
+  resend: { emails: { send: vi.fn() } },
+  FROM_EMAIL: "hello@aylek.test",
+}));
+vi.mock("@/lib/agents/close-01", () => ({
+  draftProposalHtml: vi.fn(async () => ({ subject: "", html: "", amount_cents: null })),
+  sendProposal: vi.fn(async () => ({ ok: true, email_sent: false })),
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: () => ({

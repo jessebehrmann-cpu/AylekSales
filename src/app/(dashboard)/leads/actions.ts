@@ -26,6 +26,7 @@ import {
   isAnthropicKeyMissing,
   isAnthropicUnavailableError,
 } from "@/lib/anthropic";
+import { draftProposalHtml, sendProposal } from "@/lib/agents/close-01";
 
 const STAGES = [
   "new",
@@ -413,6 +414,64 @@ export async function submitMeetingNotes(
       }
     }
 
+    // Item 8 — Close-01 also drafts an HTML proposal anchored on the
+    // same meeting notes + playbook context. We persist a proposals row
+    // (status='sent') and email the lead a /p/[token] link. The legacy
+    // proposal_review approval above stays in place for HOS visibility,
+    // but the public flow now runs through Close-01 (Stripe checkout
+    // when pricing is set, manual follow-up otherwise).
+    let close01ProposalId: string | null = null;
+    let close01Warning: string | null = null;
+    if (data.outcome !== "no_show") {
+      try {
+        const close = await draftProposalHtml({
+          playbook,
+          lead: {
+            company_name: lead.company_name,
+            contact_name: lead.contact_name,
+            title: lead.title,
+            industry: lead.industry,
+          },
+          meetingNote: {
+            outcome: data.outcome,
+            notes: data.notes ?? null,
+            transcript: data.transcript ?? null,
+            objections: data.objections ?? null,
+            next_steps: data.next_steps ?? null,
+          },
+        });
+        const { data: proposalRow, error: proposalErr } = await supabase
+          .from("proposals")
+          .insert({
+            client_id: lead.client_id,
+            lead_id: lead.id,
+            meeting_note_id: noteRow.id,
+            html_content: close.html,
+            subject: close.subject,
+            amount_cents: close.amount_cents,
+            currency: "usd",
+            status: "sent",
+            created_by: user.auth.id,
+          })
+          .select("id")
+          .single();
+        if (proposalErr || !proposalRow) {
+          close01Warning = `Proposal row create failed: ${proposalErr?.message ?? "unknown"}`;
+        } else {
+          close01ProposalId = (proposalRow as { id: string }).id;
+          const sendRes = await sendProposal(supabase, close01ProposalId);
+          if (!sendRes.ok) {
+            close01Warning = sendRes.error;
+          } else if (sendRes.warning) {
+            close01Warning = sendRes.warning;
+          }
+        }
+        if (close.warning && !close01Warning) close01Warning = close.warning;
+      } catch (err) {
+        close01Warning = err instanceof Error ? err.message : String(err);
+      }
+    }
+
     await logEvent({
       event_type: "meeting_completed",
       lead_id: lead.id,
@@ -424,6 +483,8 @@ export async function submitMeetingNotes(
         outcome: data.outcome,
         meeting_note_id: noteRow.id,
         proposal_approval_id: approvalId,
+        close01_proposal_id: close01ProposalId,
+        close01_warning: close01Warning,
         next_stage_id: nextStage?.id ?? null,
       },
     });

@@ -42,7 +42,10 @@ export async function updateSession(request: NextRequest) {
     pathname.startsWith("/onboard/") ||
     pathname.startsWith("/api/onboarding/") ||
     // Public unsubscribe link in every outbound. No login — gated by token.
-    pathname.startsWith("/u/");
+    pathname.startsWith("/u/") ||
+    // Close-01 proposal pages (Item 8) — public, gated by per-proposal token.
+    pathname.startsWith("/p/") ||
+    pathname.startsWith("/api/proposals/");
 
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();
