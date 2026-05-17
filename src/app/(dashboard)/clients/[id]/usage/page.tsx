@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,8 +14,9 @@ export const dynamic = "force-dynamic";
  * RLS-scoped view via /portal (Phase 5).
  */
 export default async function ClientUsagePage({ params }: { params: { id: string } }) {
-  await requireUser();
-  const supabase = createClient();
+  const user = await requireUser();
+  const isAdmin = user.profile?.role === "admin";
+  const supabase = isAdmin ? createServiceClient() : createClient();
 
   const { data } = await supabase.from("clients").select("*").eq("id", params.id).maybeSingle();
   const client = (data as Client | null) ?? null;

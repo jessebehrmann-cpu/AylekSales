@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, createServiceClient } from "@/lib/supabase/server";
+import { requireUser } from "@/lib/auth";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/empty-state";
@@ -12,7 +13,11 @@ import { Building2, Plus } from "lucide-react";
 export const dynamic = "force-dynamic";
 
 export default async function ClientsPage() {
-  const supabase = createClient();
+  const user = await requireUser();
+  const isAdmin = user.profile?.role === "admin";
+  // Admins read via service-role so empty users.client_ids doesn't
+  // hide the list under RLS. Non-admins keep the scoped read.
+  const supabase = isAdmin ? createServiceClient() : createClient();
   const { data: clients } = await supabase
     .from("clients")
     .select("*")

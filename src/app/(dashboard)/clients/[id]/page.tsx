@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -21,7 +21,11 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   const user = await requireUser();
   const isAdmin = user.profile?.role === "admin";
 
-  const supabase = createClient();
+  // Admin reads bypass RLS via service-role so an admin whose
+  // users.client_ids is empty (the default) still sees every client.
+  // Non-admin (client_owner) reads stay on the anon-cookies client so
+  // RLS enforces the client_ids whitelist.
+  const supabase = isAdmin ? createServiceClient() : createClient();
   const [{ data: client }, { data: leads }, { data: campaigns }, { data: events }, { data: onboardingRows }] = await Promise.all([
     supabase.from("clients").select("*").eq("id", params.id).maybeSingle(),
     supabase

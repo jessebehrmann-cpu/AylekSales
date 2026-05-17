@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,8 +18,9 @@ export const dynamic = "force-dynamic";
  * team member per lead we can populate this).
  */
 export default async function ClientReportPage({ params }: { params: { id: string } }) {
-  await requireUser();
-  const supabase = createClient();
+  const user = await requireUser();
+  const isAdmin = user.profile?.role === "admin";
+  const supabase = isAdmin ? createServiceClient() : createClient();
   const { data: clientRow } = await supabase
     .from("clients")
     .select("*")
