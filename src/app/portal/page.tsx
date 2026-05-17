@@ -6,12 +6,14 @@ import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { formatDateTime, formatCurrency } from "@/lib/utils";
 import type {
+  AppEvent,
   Approval,
   Client,
   Lead,
   SalesProcessStage,
 } from "@/lib/supabase/types";
 import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
+import { describeEvent } from "@/lib/event-format";
 
 export const dynamic = "force-dynamic";
 
@@ -237,12 +239,15 @@ export default async function PortalPage() {
           </CardHeader>
           <CardContent>
             <ul className="divide-y text-sm">
-              {events.slice(0, 10).map((e, i) => (
-                <li key={i} className="flex items-center justify-between py-2 text-xs">
-                  <span>{e.event_type}</span>
-                  <span className="text-muted-foreground">{formatDateTime(e.created_at)}</span>
-                </li>
-              ))}
+              {events.slice(0, 10).map((e, i) => {
+                const fe = describeEvent(e as Pick<AppEvent, "event_type" | "payload">);
+                return (
+                  <li key={i} className="flex items-center justify-between py-2 text-xs">
+                    <span className="truncate">{fe.headline}</span>
+                    <span className="shrink-0 text-muted-foreground">{formatDateTime(e.created_at)}</span>
+                  </li>
+                );
+              })}
             </ul>
           </CardContent>
         </Card>

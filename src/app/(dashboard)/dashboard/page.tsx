@@ -6,8 +6,9 @@ import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Upload, Send, Hand } from "lucide-react";
 import { SalesFunnel, type FunnelLead, type StageCount } from "./sales-funnel";
-import type { SalesProcessStage } from "@/lib/supabase/types";
+import type { AppEvent, SalesProcessStage } from "@/lib/supabase/types";
 import { inferProcessStageFromLeadStage } from "@/lib/playbook-defaults";
+import { describeEvent } from "@/lib/event-format";
 
 export const dynamic = "force-dynamic";
 
@@ -219,21 +220,35 @@ export default async function DashboardPage({
               </p>
             ) : (
               <ul className="divide-y">
-                {recentEvents.map((e) => (
-                  <li key={e.id} className="flex items-center justify-between gap-4 px-6 py-3 text-sm">
-                    <div>
-                      <span className="font-medium">{e.event_type}</span>
-                      {e.payload && Object.keys(e.payload as object).length > 0 && (
-                        <span className="ml-2 text-muted-foreground">
-                          {summarisePayload(e.payload as Record<string, unknown>)}
-                        </span>
-                      )}
-                    </div>
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {formatDateTime(e.created_at)}
-                    </span>
-                  </li>
-                ))}
+                {recentEvents.map((e) => {
+                  const fe = describeEvent(e as Pick<AppEvent, "event_type" | "payload">);
+                  return (
+                    <li
+                      key={e.id}
+                      className="flex items-center justify-between gap-4 px-6 py-3 text-sm"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(fe.status)}`} />
+                          <span className="truncate font-medium">{fe.headline}</span>
+                          {fe.source && (
+                            <span className="shrink-0 rounded-full border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                              {fe.source}
+                            </span>
+                          )}
+                        </div>
+                        {fe.detail && (
+                          <span className="ml-3.5 mt-0.5 block truncate text-xs text-muted-foreground">
+                            {fe.detail}
+                          </span>
+                        )}
+                      </div>
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {formatDateTime(e.created_at)}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </CardContent>
@@ -243,11 +258,15 @@ export default async function DashboardPage({
   );
 }
 
-function summarisePayload(payload: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const key of ["lead_name", "company_name", "client_name", "campaign_name", "subject", "from"]) {
-    if (typeof payload[key] === "string") parts.push(`${key}: ${payload[key]}`);
-    if (parts.length >= 2) break;
+function statusDot(status: "ok" | "warn" | "fail" | "info"): string {
+  switch (status) {
+    case "ok":
+      return "bg-emerald-500";
+    case "warn":
+      return "bg-amber-500";
+    case "fail":
+      return "bg-rose-500";
+    default:
+      return "bg-muted-foreground/40";
   }
-  return parts.join(" · ");
 }

@@ -38,6 +38,11 @@ export function OnboardingTimelineCard({
 }: {
   sessions: OnboardingSession[];
 }) {
+  // Sessions arrive newest-first. Pick the most-recent in-flight session
+  // (status != approved) as the "current" one. Approved sessions and any
+  // older in-flight ones go behind a "View history" toggle.
+  const [historyOpen, setHistoryOpen] = useState(false);
+
   if (sessions.length === 0) {
     return (
       <Card>
@@ -54,11 +59,27 @@ export function OnboardingTimelineCard({
     );
   }
 
+  const activeIdx = sessions.findIndex((s) => s.status !== "approved");
+  const current = activeIdx >= 0 ? sessions[activeIdx] : sessions[0];
+  const history = sessions.filter((s) => s.id !== current.id);
+
   return (
     <div className="space-y-3">
-      {sessions.map((s) => (
-        <SessionCard key={s.id} session={s} />
-      ))}
+      <SessionCard session={current} />
+      {history.length > 0 && (
+        <div className="text-center">
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((v) => !v)}
+            className="text-xs font-medium text-muted-foreground underline hover:text-foreground"
+          >
+            {historyOpen
+              ? `Hide ${history.length} earlier session${history.length === 1 ? "" : "s"}`
+              : `View ${history.length} earlier session${history.length === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      )}
+      {historyOpen && history.map((s) => <SessionCard key={s.id} session={s} />)}
     </div>
   );
 }

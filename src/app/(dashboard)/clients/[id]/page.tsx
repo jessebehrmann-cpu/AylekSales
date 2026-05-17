@@ -13,7 +13,8 @@ import { OnboardingTimelineCard } from "./onboarding-timeline";
 import { InviteOwnerForm } from "./invite-owner-form";
 import { ExternalLink, Users, Send, UserCircle } from "lucide-react";
 import { resolveProviders } from "@/lib/agents/providers";
-import type { OnboardingSession } from "@/lib/supabase/types";
+import { describeEvent } from "@/lib/event-format";
+import type { AppEvent, OnboardingSession } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
 
@@ -213,12 +214,28 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
               <CardHeader><CardTitle className="text-base">Recent activity</CardTitle></CardHeader>
               <CardContent>
                 <ul className="divide-y">
-                  {events.map((e, i) => (
-                    <li key={i} className="flex items-center justify-between py-2 text-sm">
-                      <span>{e.event_type}</span>
-                      <span className="text-xs text-muted-foreground">{formatDateTime(e.created_at)}</span>
-                    </li>
-                  ))}
+                  {events.map((e, i) => {
+                    const fe = describeEvent(e as Pick<AppEvent, "event_type" | "payload">);
+                    return (
+                      <li key={i} className="flex items-center justify-between py-2 text-sm">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                            fe.status === "ok" ? "bg-emerald-500"
+                              : fe.status === "warn" ? "bg-amber-500"
+                              : fe.status === "fail" ? "bg-rose-500"
+                              : "bg-muted-foreground/40"
+                          }`} />
+                          <span className="truncate">{fe.headline}</span>
+                          {fe.source && (
+                            <span className="shrink-0 rounded-full border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                              {fe.source}
+                            </span>
+                          )}
+                        </div>
+                        <span className="shrink-0 text-xs text-muted-foreground">{formatDateTime(e.created_at)}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               </CardContent>
             </Card>
